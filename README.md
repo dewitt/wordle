@@ -63,12 +63,3 @@ Use the `--find-best-start` flag. This will run a full analysis, which may take 
 ```bash
 ./build/solver_cpp --find-best-start
 ```
-## Updating Precomputed Data
-
-The solver embeds the official answer/guess lists and a lookup table for the optimal second guess after opening with `roate`. If you need to refresh these tables (for example, when the official lists change), run:
-
-```bash
-python3 tools/generate_tables.py
-```
-
-This script regenerates `word_lists.h` and `opening_table.h` using `official_answers.txt`, `official_guesses.txt`, and the current `build/solver_cpp` binary.

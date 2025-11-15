@@ -38,8 +38,7 @@
 #include <chrono>
 #include <array>
 #include <cstdint>
-#include "word_lists.h"
-#include "opening_table.h"
+#include <fstream>
 
 // --- Type Definitions for Optimization ---
 using encoded_word = uint64_t;
@@ -69,21 +68,56 @@ std::string decode_word(encoded_word encoded) {
     return word;
 }
 
-std::vector<encoded_word> load_answers() {
-    return std::vector<encoded_word>(std::begin(kEncodedAnswers), std::end(kEncodedAnswers));
+std::vector<encoded_word> load_word_list_encoded(const std::string& path) {
+    std::ifstream file(path);
+    std::vector<encoded_word> words;
+    std::string line;
+    if (!file.is_open()) {
+        std::cerr << "Error: Word list file not found at '" << path << "'" << std::endl;
+        return words;
+    }
+    while (std::getline(file, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        if (line.length() == 5) {
+            words.push_back(encode_word(line));
+        }
+    }
+    return words;
 }
 
-std::vector<encoded_word> load_guesses() {
-    return std::vector<encoded_word>(std::begin(kEncodedGuesses), std::end(kEncodedGuesses));
+std::array<encoded_word, 243> load_second_guess_table(const std::string& path) {
+    std::array<encoded_word, 243> table{};
+    std::ifstream file(path);
+    std::string line;
+    if (!file.is_open()) {
+        std::cerr << "Warning: Could not load second-guess table from '" << path << "'. Using fallback search." << std::endl;
+        return table;
+    }
+
+    size_t index = 0;
+    while (index < table.size() && std::getline(file, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        if (line.length() == 5) {
+            table[index] = encode_word(line);
+        } else {
+            table[index] = 0;
+        }
+        ++index;
+    }
+    return table;
 }
 
 constexpr encoded_word kInitialGuess = encode_word("roate");
 
-encoded_word lookup_second_guess(feedback_int feedback) {
-    if (feedback < 0 || feedback >= static_cast<feedback_int>(std::size(kSecondGuessTable))) {
+encoded_word lookup_second_guess(feedback_int feedback, const std::array<encoded_word, 243>& table) {
+    if (feedback < 0 || feedback >= static_cast<feedback_int>(table.size())) {
         return 0;
     }
-    return static_cast<encoded_word>(kSecondGuessTable[feedback]);
+    return table[feedback];
 }
 
 // --- Core Logic (Operating on Encoded Data) ---
@@ -292,7 +326,8 @@ void run_non_interactive(
     encoded_word answer, 
     const std::vector<encoded_word>& answers, 
     const std::vector<encoded_word>& all_words,
-    bool hard_mode) 
+    bool hard_mode,
+    const std::array<encoded_word, 243>& second_guess_table) 
 {
     auto possible_words = answers;
     int turn = 1;
@@ -311,7 +346,7 @@ void run_non_interactive(
             if (possible_words.size() == 1) {
                 guess = possible_words[0];
             } else if (!hard_mode && turn == 2) {
-                const encoded_word precomputed = lookup_second_guess(feedback_val);
+                const encoded_word precomputed = lookup_second_guess(feedback_val, second_guess_table);
                 if (precomputed != 0) {
                     guess = precomputed;
                 } else {
@@ -384,8 +419,8 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    const auto answers = load_answers();
-    const auto guesses = load_guesses();
+    const auto answers = load_word_list_encoded("official_answers.txt");
+    const auto guesses = load_word_list_encoded("official_guesses.txt");
 
     if (answers.empty()) {
         std::cerr << "Could not load official answers list. Exiting." << std::endl;
@@ -420,7 +455,8 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        run_non_interactive(encoded_answer, answers, all_words, hard_mode);
+        const auto second_guess_table = load_second_guess_table("opening_second_guesses.txt");
+        run_non_interactive(encoded_answer, answers, all_words, hard_mode, second_guess_table);
     } else {
         std::cerr << "Invalid arguments." << std::endl;
         std::cerr << "Usage: " << argv[0] << " --word <target_word> [--hard-mode]" << std::endl;
