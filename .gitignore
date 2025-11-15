@@ -1,0 +1,10 @@
+# Ignore the build directory
+build/
+
+# Ignore OS-specific files
+.DS_Store
+*.swp
+*~
+
+# Ignore user-specific files
+.vscode/
