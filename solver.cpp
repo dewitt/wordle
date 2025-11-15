@@ -1,3 +1,5 @@
+// (Existing functions: encode_word, decode_word, load_word_list_encoded, get_char_code_at, calculate_feedback_encoded, filter_word_list_encoded)
+
 /**
  * solver.cpp - A highly optimized, multithreaded Wordle solver in C++.
  *
@@ -142,6 +144,52 @@ std::vector<encoded_word> filter_word_list_encoded(
     return new_list;
 }
 
+// --- Hard Mode Logic ---
+
+// Checks if a potential guess is valid under hard mode rules.
+bool is_valid_hard_mode_guess(encoded_word potential_guess, encoded_word previous_guess, feedback_int previous_feedback) {
+    uint8_t prev_guess_codes[5];
+    uint8_t potential_guess_codes[5];
+    uint8_t feedback_codes[5];
+    
+    int temp_feedback = previous_feedback;
+    for(int i = 4; i >= 0; --i) {
+        feedback_codes[i] = temp_feedback % 3;
+        temp_feedback /= 3;
+    }
+
+    uint8_t required_yellows[27] = {0};
+
+    for (int i = 0; i < 5; ++i) {
+        prev_guess_codes[i] = get_char_code_at(previous_guess, i);
+        potential_guess_codes[i] = get_char_code_at(potential_guess, i);
+
+        // Rule 1: Green letters must be in the same spot.
+        if (feedback_codes[i] == 2 && potential_guess_codes[i] != prev_guess_codes[i]) {
+            return false;
+        }
+        // Collect required yellow letters.
+        if (feedback_codes[i] == 1) {
+            required_yellows[prev_guess_codes[i]]++;
+        }
+    }
+
+    // Rule 2: Yellow letters must be present in the new guess.
+    uint8_t potential_guess_counts[27] = {0};
+    for(int i = 0; i < 5; ++i) {
+        potential_guess_counts[potential_guess_codes[i]]++;
+    }
+
+    for(int i = 1; i <= 26; ++i) {
+        if (potential_guess_counts[i] < required_yellows[i]) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+
 // The worker task for std::async to find the best guess in a subset of words.
 std::pair<encoded_word, double> find_best_guess_worker(
     const std::vector<encoded_word> possible_words,
@@ -172,25 +220,43 @@ std::pair<encoded_word, double> find_best_guess_worker(
 // Finds the best word to guess next using a pool of asynchronous tasks.
 encoded_word find_best_guess_encoded(
     const std::vector<encoded_word>& possible_words, 
-    const std::vector<encoded_word>& all_words) 
+    const std::vector<encoded_word>& all_words,
+    bool hard_mode,
+    encoded_word previous_guess,
+    feedback_int previous_feedback) 
 {
     if (possible_words.empty()) {
         return 0;
+    }
+
+    // In hard mode, we must first filter the list of all possible guesses.
+    const std::vector<encoded_word>* guesses_to_check = &all_words;
+    std::vector<encoded_word> valid_hard_mode_guesses;
+    if (hard_mode && previous_guess != 0) {
+        valid_hard_mode_guesses.reserve(all_words.size() / 10);
+        for (const auto& guess : all_words) {
+            if (is_valid_hard_mode_guess(guess, previous_guess, previous_feedback)) {
+                valid_hard_mode_guesses.push_back(guess);
+            }
+        }
+        guesses_to_check = &valid_hard_mode_guesses;
     }
 
     unsigned int num_threads = std::thread::hardware_concurrency();
     if (num_threads == 0) num_threads = 4;
 
     std::vector<std::vector<encoded_word>> word_chunks(num_threads);
-    for (size_t i = 0; i < all_words.size(); ++i) {
-        word_chunks[i % num_threads].push_back(all_words[i]);
+    for (size_t i = 0; i < guesses_to_check->size(); ++i) {
+        word_chunks[i % num_threads].push_back((*guesses_to_check)[i]);
     }
 
     std::vector<std::future<std::pair<encoded_word, double>>> futures;
     for (unsigned int i = 0; i < num_threads; ++i) {
-        futures.push_back(std::async(std::launch::async, find_best_guess_worker, 
-                                     std::cref(possible_words), 
-                                     std::cref(word_chunks[i])));
+        if (!word_chunks[i].empty()) {
+            futures.push_back(std::async(std::launch::async, find_best_guess_worker, 
+                                         std::cref(possible_words), 
+                                         std::cref(word_chunks[i])));
+        }
     }
 
     encoded_word best_guess = 0;
@@ -212,13 +278,15 @@ encoded_word find_best_guess_encoded(
 void run_non_interactive(
     encoded_word answer, 
     const std::vector<encoded_word>& answers, 
-    const std::vector<encoded_word>& all_words) 
+    const std::vector<encoded_word>& all_words,
+    bool hard_mode) 
 {
     auto possible_words = answers;
     int turn = 1;
     encoded_word guess = 0;
+    feedback_int feedback_val = 0;
 
-    std::cout << "Solving for: " << decode_word(answer) << std::endl;
+    std::cout << "Solving for: " << decode_word(answer) << (hard_mode ? " (Hard Mode)" : "") << std::endl;
     std::cout << "------------------------------" << std::endl;
 
     while (turn <= 6 && guess != answer) {
@@ -230,22 +298,21 @@ void run_non_interactive(
             if (possible_words.size() == 1) {
                 guess = possible_words[0];
             } else {
-                guess = find_best_guess_encoded(possible_words, all_words);
+                guess = find_best_guess_encoded(possible_words, all_words, hard_mode, guess, feedback_val);
             }
         }
 
         if (guess == 0) {
-            std::cout << "Solver failed to find a guess." << std::endl;
+            std::cout << "Solver failed to find a valid guess." << std::endl;
             break;
         }
 
-        const feedback_int feedback_val = calculate_feedback_encoded(guess, answer);
+        feedback_val = calculate_feedback_encoded(guess, answer);
         
         // Manually decode feedback for printing
         std::string feedback_str;
         feedback_str.reserve(5);
         int temp_feedback = feedback_val;
-        // There are 243 possible feedbacks (3^5)
         for(int i = 0; i < 5; ++i) {
             const int remainder = temp_feedback % 3;
             if (remainder == 2) feedback_str += 'g';
@@ -277,12 +344,25 @@ int main(int argc, char* argv[]) {
     std::cin.tie(NULL);
 
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " --word <target_word>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " --word <target_word> [--hard-mode]" << std::endl;
         std::cerr << "   or: " << argv[0] << " --find-best-start" << std::endl;
         return 1;
     }
 
-    const std::string mode = argv[1];
+    std::string mode = argv[1];
+    std::string word_to_solve;
+    bool hard_mode = false;
+
+    if (mode == "--word") {
+        if (argc < 3) {
+            std::cerr << "Error: --word requires a target word." << std::endl;
+            return 1;
+        }
+        word_to_solve = argv[2];
+        if (argc == 4 && std::string(argv[3]) == "--hard-mode") {
+            hard_mode = true;
+        }
+    }
 
     const auto answers = load_word_list_encoded("official_answers.txt");
     const auto guesses = load_word_list_encoded("official_guesses.txt");
@@ -301,7 +381,7 @@ int main(int argc, char* argv[]) {
         
         const auto start_time = std::chrono::high_resolution_clock::now();
         
-        const encoded_word best_word = find_best_guess_encoded(answers, all_words);
+        const encoded_word best_word = find_best_guess_encoded(answers, all_words, false, 0, 0);
         
         const auto end_time = std::chrono::high_resolution_clock::now();
         const std::chrono::duration<double> elapsed = end_time - start_time;
@@ -310,8 +390,7 @@ int main(int argc, char* argv[]) {
         std::cout << "Best starting word: " << decode_word(best_word) << std::endl;
         std::cout << "Calculation time: " << elapsed.count() << " seconds." << std::endl;
 
-    } else if (mode == "--word" && argc == 3) {
-        const std::string word_to_solve = argv[2];
+    } else if (mode == "--word") {
         const encoded_word encoded_answer = encode_word(word_to_solve);
         
         const bool answer_is_valid = std::find(answers.begin(), answers.end(), encoded_answer) != answers.end();
@@ -321,10 +400,10 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        run_non_interactive(encoded_answer, answers, all_words);
+        run_non_interactive(encoded_answer, answers, all_words, hard_mode);
     } else {
         std::cerr << "Invalid arguments." << std::endl;
-        std::cerr << "Usage: " << argv[0] << " --word <target_word>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " --word <target_word> [--hard-mode]" << std::endl;
         std::cerr << "   or: " << argv[0] << " --find-best-start" << std::endl;
         return 1;
     }
