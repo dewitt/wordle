@@ -12,6 +12,10 @@ This project serves as a case study in C++ performance optimization, demonstrati
 -   **Optimized Data Structures:** 5-letter words are encoded into 64-bit integers, allowing for extremely fast, cache-friendly comparisons using bitwise operations.
 -   **Official Word Lists:** Uses the official, community-verified Wordle answer and guess lists for accuracy.
 
+## Data Files
+
+Two plain-text files live at the repository root: `official_answers.txt` and `official_guesses.txt`. Each contains one five-letter lowercase word per line. The solver loads and encodes these lists at startup, so you can swap in custom dictionaries by editing the text files—no code changes or regeneration steps are required.
+
 ## Modes of Operation
 
 The solver can be run in two modes:
