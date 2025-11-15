@@ -1,5 +1,7 @@
 # Ignore the build directory
 build/
+feedback_table.bin
+lookup_*.bin
 
 # Ignore OS-specific files
 .DS_Store

@@ -35,18 +35,148 @@
 #include <fstream>
 #include <future>
 #include <iostream>
+#include <cstring>
 #include <iterator>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#if defined(__unix__) || defined(__APPLE__)
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+#include "opening_table.h"
+#include "word_lists.h"
 
 // --- Type Definitions for Optimization ---
 using encoded_word = uint64_t;
 using feedback_int = int;
+
+struct FeedbackTable {
+  size_t guess_count = 0;
+  size_t answer_count = 0;
+  std::vector<uint8_t> owned_data;
+  const uint8_t *mapped_data = nullptr;
+  size_t mapping_length = 0;
+
+  FeedbackTable() = default;
+  FeedbackTable(const FeedbackTable &) = delete;
+  FeedbackTable &operator=(const FeedbackTable &) = delete;
+  FeedbackTable(FeedbackTable &&other) noexcept { *this = std::move(other); }
+  FeedbackTable &operator=(FeedbackTable &&other) noexcept {
+    if (this != &other) {
+      release();
+      guess_count = other.guess_count;
+      answer_count = other.answer_count;
+      owned_data = std::move(other.owned_data);
+      mapped_data = other.mapped_data;
+      mapping_length = other.mapping_length;
+      other.mapped_data = nullptr;
+      other.mapping_length = 0;
+      other.guess_count = 0;
+      other.answer_count = 0;
+    }
+    return *this;
+  }
+
+  ~FeedbackTable() { release(); }
+
+  bool loaded() const { return mapped_data || !owned_data.empty(); }
+
+  const uint8_t *data() const {
+    return mapped_data ? mapped_data : owned_data.data();
+  }
+
+  const uint8_t *row(size_t guess_idx) const {
+    return data() + guess_idx * answer_count;
+  }
+
+private:
+  void release() {
+#if defined(__unix__) || defined(__APPLE__)
+    if (mapped_data) {
+      munmap(const_cast<uint8_t *>(mapped_data), mapping_length);
+    }
+#endif
+    mapped_data = nullptr;
+    mapping_length = 0;
+  }
+};
+
+struct LookupTables {
+  std::unordered_map<encoded_word, size_t> answer_index;
+  std::unordered_map<encoded_word, size_t> guess_index;
+};
+
+struct PrecomputedLookup {
+  std::vector<uint8_t> buffer;
+  const uint8_t *root = nullptr;
+  uint32_t depth = 0;
+  encoded_word start_word = 0;
+
+  bool load(const std::string &path, encoded_word expected_start) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file.is_open())
+      return false;
+    const auto size = file.tellg();
+    file.seekg(0);
+    buffer.resize(static_cast<size_t>(size));
+    if (!file.read(reinterpret_cast<char *>(buffer.data()), size)) {
+      buffer.clear();
+      return false;
+    }
+    if (size < 32)
+      return false;
+    const uint8_t *ptr = buffer.data();
+    if (std::memcmp(ptr, "PLUT", 4) != 0)
+      return false;
+    ptr += 4;
+    const uint32_t version = *reinterpret_cast<const uint32_t *>(ptr);
+    ptr += 4;
+    depth = *reinterpret_cast<const uint32_t *>(ptr);
+    ptr += 4;
+    start_word = *reinterpret_cast<const encoded_word *>(ptr);
+    ptr += sizeof(encoded_word);
+    ptr += 5; // start word string
+    ptr += 3; // padding
+    const uint32_t root_offset = *reinterpret_cast<const uint32_t *>(ptr);
+    if (version != 1 || start_word != expected_start ||
+        root_offset >= buffer.size())
+      return false;
+    root = buffer.data() + root_offset;
+    return true;
+  }
+
+  const uint8_t *find_child(const uint8_t *node, uint16_t feedback,
+                            encoded_word &guess_out) const {
+    if (!node)
+      return nullptr;
+    uint32_t count = *reinterpret_cast<const uint32_t *>(node);
+    const uint8_t *ptr = node + 4;
+    for (uint32_t i = 0; i < count; ++i) {
+      uint16_t fb = *reinterpret_cast<const uint16_t *>(ptr);
+      ptr += 2; // skip feedback
+      ptr += 2; // skip reserved
+      encoded_word guess = *reinterpret_cast<const encoded_word *>(ptr);
+      ptr += sizeof(encoded_word);
+      uint32_t child = *reinterpret_cast<const uint32_t *>(ptr);
+      ptr += 4;
+      if (fb == feedback) {
+        guess_out = guess;
+        if (child == 0)
+          return nullptr;
+        return buffer.data() + child;
+      }
+    }
+    return nullptr;
+  }
+};
 
 // --- Encoding/Decoding Functions ---
 
@@ -72,27 +202,31 @@ std::string decode_word(encoded_word encoded) {
   return word;
 }
 
-std::vector<encoded_word> load_word_list_encoded(const std::string &path) {
-  std::ifstream file(path);
-  std::vector<encoded_word> words;
-  std::string line;
-  if (!file.is_open()) {
-    std::cerr << "Error: Word list file not found at '" << path << "'"
-              << std::endl;
+const std::vector<encoded_word> &load_answers() {
+  static const std::vector<encoded_word> answers(std::begin(kEncodedAnswers),
+                                                 std::end(kEncodedAnswers));
+  return answers;
+}
+
+const std::vector<encoded_word> &load_guesses() {
+  static const std::vector<encoded_word> guesses(std::begin(kEncodedGuesses),
+                                                 std::end(kEncodedGuesses));
+  return guesses;
+}
+
+const std::vector<encoded_word> &load_all_words() {
+  static const std::vector<encoded_word> combined = [] {
+    std::vector<encoded_word> words;
+    words.reserve(kAnswersCount + kGuessesCount);
+    words.insert(words.end(), kEncodedAnswers, kEncodedAnswers + kAnswersCount);
+    words.insert(words.end(), kEncodedGuesses, kEncodedGuesses + kGuessesCount);
     return words;
-  }
-  while (std::getline(file, line)) {
-    if (!line.empty() && line.back() == '\r') {
-      line.pop_back();
-    }
-    if (line.length() == 5) {
-      words.push_back(encode_word(line));
-    }
-  }
-  return words;
+  }();
+  return combined;
 }
 
 constexpr encoded_word kInitialGuess = encode_word("roate");
+constexpr const char *kFeedbackTablePath = "feedback_table.bin";
 
 // --- Core Logic (Operating on Encoded Data) ---
 
@@ -141,18 +275,119 @@ feedback_int calculate_feedback_encoded(encoded_word guess_encoded,
   return final_feedback;
 }
 
-// Filters a list of encoded words based on a guess and its feedback.
-std::vector<encoded_word>
-filter_word_list_encoded(const std::vector<encoded_word> &words,
-                         encoded_word guess, feedback_int feedback) {
-  std::vector<encoded_word> new_list;
-  new_list.reserve(words.size() / 5); // Pre-allocate memory
-  for (const auto &word : words) {
-    if (calculate_feedback_encoded(guess, word) == feedback) {
-      new_list.push_back(word);
+LookupTables build_lookup_tables(const std::vector<encoded_word> &answers,
+                                 const std::vector<encoded_word> &all_words) {
+  LookupTables tables;
+  tables.answer_index.reserve(answers.size());
+  for (size_t i = 0; i < answers.size(); ++i) {
+    tables.answer_index.emplace(answers[i], i);
+  }
+  tables.guess_index.reserve(all_words.size());
+  for (size_t i = 0; i < all_words.size(); ++i) {
+    tables.guess_index.emplace(all_words[i], i);
+  }
+  return tables;
+}
+
+const LookupTables &load_lookup_tables() {
+  static const LookupTables tables =
+      build_lookup_tables(load_answers(), load_all_words());
+  return tables;
+}
+
+FeedbackTable load_feedback_table(const std::string &path, size_t guess_count,
+                                  size_t answer_count) {
+  FeedbackTable table;
+#if defined(__unix__) || defined(__APPLE__)
+  const size_t expected_size = guess_count * answer_count;
+  int fd = ::open(path.c_str(), O_RDONLY);
+  if (fd >= 0) {
+    struct stat st{};
+    if (fstat(fd, &st) == 0 &&
+        static_cast<size_t>(st.st_size) == expected_size) {
+      void *mapping = mmap(nullptr, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+      if (mapping != MAP_FAILED) {
+        table.mapped_data = static_cast<const uint8_t *>(mapping);
+        table.mapping_length = static_cast<size_t>(st.st_size);
+        table.guess_count = guess_count;
+        table.answer_count = answer_count;
+        ::close(fd);
+        return table;
+      }
+    }
+    ::close(fd);
+  }
+#endif
+  std::ifstream file(path, std::ios::binary);
+  if (!file.is_open()) {
+    return table;
+  }
+  table.owned_data.resize(guess_count * answer_count);
+  if (!file.read(reinterpret_cast<char *>(table.owned_data.data()),
+                 static_cast<std::streamsize>(table.owned_data.size()))) {
+    table.owned_data.clear();
+    return table;
+  }
+  table.guess_count = guess_count;
+  table.answer_count = answer_count;
+  return table;
+}
+
+bool build_feedback_table_file(const std::string &path,
+                               const std::vector<encoded_word> &answers,
+                               const std::vector<encoded_word> &all_words) {
+  std::ofstream file(path, std::ios::binary | std::ios::trunc);
+  if (!file.is_open()) {
+    std::cerr << "Failed to open '" << path << "' for writing.\n";
+    return false;
+  }
+  size_t written = 0;
+  for (const auto &guess : all_words) {
+    for (const auto &answer : answers) {
+      const uint8_t feedback =
+          static_cast<uint8_t>(calculate_feedback_encoded(guess, answer));
+      file.put(static_cast<char>(feedback));
+      ++written;
     }
   }
-  return new_list;
+  file.flush();
+  if (!file) {
+    std::cerr << "Error writing feedback table to '" << path << "'.\n";
+    return false;
+  }
+  std::cout << "Wrote " << written << " feedback entries to '" << path
+            << "'.\n";
+  return true;
+}
+
+// Filters a list of encoded words based on a guess and its feedback.
+std::vector<size_t> filter_candidate_indices(
+    const std::vector<size_t> &indices, encoded_word guess,
+    feedback_int feedback, const FeedbackTable *feedback_table,
+    const LookupTables &lookups, const std::vector<encoded_word> &answers) {
+  std::vector<size_t> new_indices;
+  if (feedback_table && feedback_table->loaded()) {
+    new_indices.reserve(indices.size());
+    const auto guess_it = lookups.guess_index.find(guess);
+    if (guess_it == lookups.guess_index.end()) {
+      return new_indices;
+    }
+    const uint8_t *row = feedback_table->row(guess_it->second);
+    for (const auto idx : indices) {
+      if (row[idx] == feedback) {
+        new_indices.push_back(idx);
+      }
+    }
+    return new_indices;
+  }
+
+  new_indices.reserve(indices.size() / 2);
+  for (const auto idx : indices) {
+    if (calculate_feedback_encoded(guess, answers[idx]) == feedback) {
+      new_indices.push_back(idx);
+    }
+  }
+  return new_indices;
 }
 
 // --- Hard Mode Logic ---
@@ -205,8 +440,11 @@ bool is_valid_hard_mode_guess(encoded_word potential_guess,
 
 // The worker task for std::async to find the best guess in a subset of words.
 std::pair<encoded_word, double>
-find_best_guess_worker(const std::vector<encoded_word> &possible_words,
-                       const std::vector<encoded_word> &guess_subset) {
+find_best_guess_worker(const std::vector<size_t> &possible_indices,
+                       const std::vector<encoded_word> &guess_subset,
+                       const FeedbackTable *feedback_table,
+                       const LookupTables &lookups,
+                       const std::vector<encoded_word> &answers) {
   encoded_word local_best_guess = 0;
   double local_min_score = std::numeric_limits<double>::max();
 
@@ -214,14 +452,33 @@ find_best_guess_worker(const std::vector<encoded_word> &possible_words,
     std::array<int, 243> feedback_groups{};
     double current_score = 0.0;
     bool pruned = false;
-    for (const auto &answer : possible_words) {
-      const feedback_int feedback = calculate_feedback_encoded(guess, answer);
-      const int count_before = feedback_groups[feedback];
-      current_score += static_cast<double>(2 * count_before + 1);
-      feedback_groups[feedback] = count_before + 1;
-      if (current_score >= local_min_score) {
-        pruned = true;
-        break;
+    if (feedback_table && feedback_table->loaded()) {
+      const auto guess_it = lookups.guess_index.find(guess);
+      if (guess_it == lookups.guess_index.end()) {
+        continue;
+      }
+      const uint8_t *row = feedback_table->row(guess_it->second);
+      for (const auto idx : possible_indices) {
+        const uint8_t feedback = row[idx];
+        const int count_before = feedback_groups[feedback];
+        current_score += static_cast<double>(2 * count_before + 1);
+        feedback_groups[feedback] = count_before + 1;
+        if (current_score >= local_min_score) {
+          pruned = true;
+          break;
+        }
+      }
+    } else {
+      for (const auto idx : possible_indices) {
+        const feedback_int feedback =
+            calculate_feedback_encoded(guess, answers[idx]);
+        const int count_before = feedback_groups[feedback];
+        current_score += static_cast<double>(2 * count_before + 1);
+        feedback_groups[feedback] = count_before + 1;
+        if (current_score >= local_min_score) {
+          pruned = true;
+          break;
+        }
       }
     }
 
@@ -234,12 +491,13 @@ find_best_guess_worker(const std::vector<encoded_word> &possible_words,
 }
 
 // Finds the best word to guess next using a pool of asynchronous tasks.
-encoded_word
-find_best_guess_encoded(const std::vector<encoded_word> &possible_words,
-                        const std::vector<encoded_word> &all_words,
-                        bool hard_mode, encoded_word previous_guess,
-                        feedback_int previous_feedback) {
-  if (possible_words.empty()) {
+encoded_word find_best_guess_encoded(
+    const std::vector<size_t> &possible_indices,
+    const std::vector<encoded_word> &answers,
+    const std::vector<encoded_word> &all_words, bool hard_mode,
+    encoded_word previous_guess, feedback_int previous_feedback,
+    const FeedbackTable *feedback_table, const LookupTables &lookups) {
+  if (possible_indices.empty()) {
     return 0;
   }
 
@@ -257,8 +515,13 @@ find_best_guess_encoded(const std::vector<encoded_word> &possible_words,
   }
 
   constexpr size_t kAnswerOnlyThreshold = 1024;
-  if (possible_words.size() <= kAnswerOnlyThreshold) {
-    guesses_to_check = &possible_words;
+  std::vector<encoded_word> limited_guesses;
+  if (possible_indices.size() <= kAnswerOnlyThreshold) {
+    limited_guesses.reserve(possible_indices.size());
+    for (const auto idx : possible_indices) {
+      limited_guesses.push_back(answers[idx]);
+    }
+    guesses_to_check = &limited_guesses;
   }
 
   unsigned int num_threads = std::thread::hardware_concurrency();
@@ -274,8 +537,9 @@ find_best_guess_encoded(const std::vector<encoded_word> &possible_words,
   for (unsigned int i = 0; i < num_threads; ++i) {
     if (!word_chunks[i].empty()) {
       futures.push_back(std::async(std::launch::async, find_best_guess_worker,
-                                   std::cref(possible_words),
-                                   std::cref(word_chunks[i])));
+                                   std::cref(possible_indices),
+                                   std::cref(word_chunks[i]), feedback_table,
+                                   std::cref(lookups), std::cref(answers)));
     }
   }
 
@@ -295,56 +559,82 @@ find_best_guess_encoded(const std::vector<encoded_word> &possible_words,
 
 // --- Main Application Logic ---
 
-void run_non_interactive(encoded_word answer,
-                         const std::vector<encoded_word> &answers,
-                         const std::vector<encoded_word> &all_words,
-                         bool hard_mode) {
-  auto possible_words = answers;
+struct SolutionStep {
+  encoded_word guess;
+  feedback_int feedback;
+};
+
+struct SolutionTrace {
+  std::vector<SolutionStep> steps;
+};
+
+void run_non_interactive(
+    encoded_word answer, const std::vector<encoded_word> &answers,
+    const std::vector<encoded_word> &all_words, bool hard_mode, bool verbose,
+    bool print_output, SolutionTrace *trace,
+    const FeedbackTable *feedback_table, const LookupTables &lookups,
+    const PrecomputedLookup *precomputed) {
+  std::vector<size_t> possible_indices(answers.size());
+  std::iota(possible_indices.begin(), possible_indices.end(), 0);
   int turn = 1;
   encoded_word guess = 0;
   feedback_int feedback_val = 0;
+  const uint8_t *lookup_node = precomputed ? precomputed->root : nullptr;
+  const uint32_t lookup_max =
+      (precomputed && precomputed->depth > 0) ? (precomputed->depth - 1) : 0;
+  uint32_t lookup_level = 0;
 
-  std::array<std::vector<encoded_word>, 243> roate_partitions;
-  std::array<encoded_word, 243> second_guess_cache{};
-  if (!hard_mode) {
-    for (const auto &candidate : answers) {
-      const feedback_int fb =
-          calculate_feedback_encoded(kInitialGuess, candidate);
-      roate_partitions[fb].push_back(candidate);
-    }
+  if (verbose && print_output) {
+    std::cout << "Solving for: " << decode_word(answer)
+              << (hard_mode ? " (Hard Mode)" : "") << std::endl;
+    std::cout << "------------------------------" << std::endl;
   }
 
-  std::cout << "Solving for: " << decode_word(answer)
-            << (hard_mode ? " (Hard Mode)" : "") << std::endl;
-  std::cout << "------------------------------" << std::endl;
-
   while (turn <= 6 && guess != answer) {
-    std::cout << "Turn " << turn << " (" << possible_words.size()
-              << " possibilities remain)" << std::endl;
+    if (verbose && print_output) {
+      std::cout << "Turn " << turn << " (" << possible_indices.size()
+                << " possibilities remain)" << std::endl;
+    }
 
-    if (turn == 1) {
-      guess = kInitialGuess;
-    } else {
-      if (possible_words.size() == 1) {
-        guess = possible_words[0];
-      } else if (!hard_mode && turn == 2) {
-        encoded_word &cached = second_guess_cache[feedback_val];
-        if (cached == 0) {
-          const auto &subset = roate_partitions[feedback_val];
-          if (subset.empty()) {
-            cached = find_best_guess_encoded(possible_words, all_words, false,
-                                             kInitialGuess, feedback_val);
-          } else if (subset.size() == 1) {
-            cached = subset[0];
-          } else {
-            cached = find_best_guess_encoded(subset, all_words, false,
-                                             kInitialGuess, feedback_val);
-          }
-        }
-        guess = cached;
+    bool used_lookup = false;
+    if (!hard_mode && precomputed && lookup_node && turn > 1 &&
+        lookup_level < lookup_max) {
+      encoded_word lookup_guess = 0;
+      const uint8_t *next_node =
+          precomputed->find_child(lookup_node,
+                                  static_cast<uint16_t>(feedback_val),
+                                  lookup_guess);
+      if (lookup_guess != 0) {
+        guess = lookup_guess;
+        lookup_node = next_node;
+        lookup_level++;
+        used_lookup = true;
       } else {
-        guess = find_best_guess_encoded(possible_words, all_words, hard_mode,
-                                        guess, feedback_val);
+        lookup_node = nullptr;
+      }
+    }
+
+    if (!used_lookup) {
+      if (turn == 1) {
+        guess = kInitialGuess;
+      } else if (!hard_mode && turn == 2) {
+        const encoded_word precomputed_guess = kSecondGuessTable[feedback_val];
+        if (precomputed_guess != 0) {
+          guess = precomputed_guess;
+          lookup_node = nullptr;
+        } else {
+          guess = find_best_guess_encoded(possible_indices, answers, all_words,
+                                          hard_mode, guess, feedback_val,
+                                          feedback_table, lookups);
+          lookup_node = nullptr;
+        }
+      } else if (possible_indices.size() == 1) {
+        guess = answers[possible_indices[0]];
+      } else {
+        guess = find_best_guess_encoded(possible_indices, answers, all_words,
+                                        hard_mode, guess, feedback_val,
+                                        feedback_table, lookups);
+        lookup_node = nullptr;
       }
     }
 
@@ -355,7 +645,6 @@ void run_non_interactive(encoded_word answer,
 
     feedback_val = calculate_feedback_encoded(guess, answer);
 
-    // Manually decode feedback for printing
     std::string feedback_str;
     feedback_str.reserve(5);
     int temp_feedback = feedback_val;
@@ -371,20 +660,29 @@ void run_non_interactive(encoded_word answer,
     }
     std::reverse(feedback_str.begin(), feedback_str.end());
 
-    std::cout << "Guess: " << decode_word(guess)
-              << ", Feedback: " << feedback_str << std::endl;
+    if (verbose && print_output) {
+      std::cout << "Guess: " << decode_word(guess)
+                << ", Feedback: " << feedback_str << std::endl;
+    }
+
+    if (trace) {
+      trace->steps.push_back({guess, feedback_val});
+    }
 
     if (feedback_str == "ggggg") {
-      std::cout << "\nSolved in " << turn << " guesses!" << std::endl;
+      if (print_output) {
+        std::cout << "\nSolved in " << turn << " guesses!" << std::endl;
+      }
       return;
     }
 
-    possible_words =
-        filter_word_list_encoded(possible_words, guess, feedback_val);
+    possible_indices =
+        filter_candidate_indices(possible_indices, guess, feedback_val,
+                                 feedback_table, lookups, answers);
     turn++;
   }
 
-  if (guess != answer) {
+  if (guess != answer && print_output) {
     std::cout << "\nSolver failed to find the word. Last guess was '"
               << decode_word(guess) << "'." << std::endl;
   }
@@ -396,47 +694,128 @@ int main(int argc, char *argv[]) {
   std::cin.tie(NULL);
 
   if (argc < 2) {
-    std::cerr << "Usage: " << argv[0] << " --word <target_word> [--hard-mode]"
-              << std::endl;
-    std::cerr << "   or: " << argv[0] << " --find-best-start" << std::endl;
+    std::cerr << "Usage: " << argv[0]
+              << " [--verbose] --word <target_word> [--hard-mode]\n";
+    std::cerr << "   or: " << argv[0] << " [--verbose] --find-best-start\n";
+    std::cerr << "   or: " << argv[0] << " --build-feedback-table\n";
     return 1;
   }
 
-  std::string mode = argv[1];
-  std::string word_to_solve;
+  bool verbose = false;
   bool hard_mode = false;
+  bool dump_json = false;
+  bool disable_lookup = false;
+  std::string mode;
+  std::string word_to_solve;
 
-  if (mode == "--word") {
-    if (argc < 3) {
-      std::cerr << "Error: --word requires a target word." << std::endl;
-      return 1;
+  for (int i = 1; i < argc;) {
+    std::string arg = argv[i];
+    if (arg == "--verbose") {
+      verbose = true;
+      ++i;
+      continue;
     }
-    word_to_solve = argv[2];
-    if (argc == 4 && std::string(argv[3]) == "--hard-mode") {
+    if (arg == "--hard-mode") {
       hard_mode = true;
+      ++i;
+      continue;
     }
+    if (arg == "--dump-json") {
+      dump_json = true;
+      ++i;
+      continue;
+    }
+    if (arg == "--disable-lookup") {
+      disable_lookup = true;
+      ++i;
+      continue;
+    }
+    if (arg == "--word") {
+      if (!mode.empty()) {
+        std::cerr << "--word cannot be combined with other modes.\n";
+        return 1;
+      }
+      mode = "--word";
+      if (i + 1 >= argc) {
+        std::cerr << "Error: --word requires a target word.\n";
+        return 1;
+      }
+      word_to_solve = argv[i + 1];
+      i += 2;
+      continue;
+    }
+    if (arg == "--find-best-start" || arg == "--build-feedback-table") {
+      if (!mode.empty()) {
+        std::cerr << "Multiple modes specified.\n";
+        return 1;
+      }
+      mode = arg;
+      ++i;
+      continue;
+    }
+    std::cerr << "Unknown argument: " << arg << std::endl;
+    return 1;
   }
 
-  const auto answers = load_word_list_encoded("official_answers.txt");
-  const auto guesses = load_word_list_encoded("official_guesses.txt");
+  if (mode.empty()) {
+    std::cerr << "No mode specified.\n";
+    return 1;
+  }
+
+  if (mode == "--word" && word_to_solve.empty()) {
+    std::cerr << "Error: --word requires a target word.\n";
+    return 1;
+  }
+
+  const auto &answers = load_answers();
+  const auto &all_words = load_all_words();
+  const LookupTables &lookups = load_lookup_tables();
 
   if (answers.empty()) {
-    std::cerr << "Could not load official answers list. Exiting." << std::endl;
+    std::cerr << "Embedded answers list is empty. Exiting." << std::endl;
     return 1;
   }
 
-  std::vector<encoded_word> all_words = answers;
-  all_words.insert(all_words.end(), guesses.begin(), guesses.end());
+  const size_t answers_count = answers.size();
+  std::vector<size_t> initial_indices(answers_count);
+  std::iota(initial_indices.begin(), initial_indices.end(), 0);
+  FeedbackTable feedback_table;
+  const FeedbackTable *feedback_ptr = nullptr;
+
+  if (mode == "--build-feedback-table") {
+    if (!build_feedback_table_file(kFeedbackTablePath, answers, all_words)) {
+      return 1;
+    }
+    return 0;
+  }
+
+  feedback_table =
+      load_feedback_table(kFeedbackTablePath, all_words.size(), answers_count);
+  if (feedback_table.loaded()) {
+    feedback_ptr = &feedback_table;
+  }
+  PrecomputedLookup lookup_table;
+  const PrecomputedLookup *lookup_ptr = nullptr;
+  if (!hard_mode && !disable_lookup &&
+      lookup_table.load("lookup_roate.bin", kInitialGuess)) {
+    lookup_ptr = &lookup_table;
+  }
+
+  if (!feedback_ptr) {
+    std::cerr << "Warning: feedback table not found at '" << kFeedbackTablePath
+              << "'. Falling back to slower feedback calculation.\n";
+  }
 
   if (mode == "--find-best-start") {
     std::cout << "Calculating the best starting word from " << all_words.size()
-              << " guesses against " << answers.size() << " possible answers..."
+              << " guesses against " << answers_count << " possible answers..."
               << std::endl;
 
     const auto start_time = std::chrono::high_resolution_clock::now();
 
     const encoded_word best_word =
-        find_best_guess_encoded(answers, all_words, false, 0, 0);
+        find_best_guess_encoded(initial_indices, answers, all_words, false, 0,
+                                0, feedback_ptr, lookups);
 
     const auto end_time = std::chrono::high_resolution_clock::now();
     const std::chrono::duration<double> elapsed = end_time - start_time;
@@ -449,8 +828,8 @@ int main(int argc, char *argv[]) {
   } else if (mode == "--word") {
     const encoded_word encoded_answer = encode_word(word_to_solve);
 
-    const bool answer_is_valid = std::find(answers.begin(), answers.end(),
-                                           encoded_answer) != answers.end();
+    const bool answer_is_valid =
+        lookups.answer_index.find(encoded_answer) != lookups.answer_index.end();
 
     if (!answer_is_valid) {
       std::cerr << "Error: '" << word_to_solve
@@ -458,7 +837,26 @@ int main(int argc, char *argv[]) {
       return 1;
     }
 
-    run_non_interactive(encoded_answer, answers, all_words, hard_mode);
+    SolutionTrace trace;
+    run_non_interactive(encoded_answer, answers, all_words, hard_mode, verbose,
+                        !dump_json, &trace, feedback_ptr, lookups,
+                        lookup_ptr);
+    if (dump_json) {
+      std::cout << "[";
+      for (size_t i = 0; i < trace.steps.size(); ++i) {
+        const auto &step = trace.steps[i];
+        std::cout << "{\"guess\":\"" << decode_word(step.guess)
+                  << "\",\"feedback\":" << step.feedback << "}";
+        if (i + 1 < trace.steps.size())
+          std::cout << ",";
+      }
+      std::cout << "]\n";
+    } else if (!verbose) {
+      for (const auto &step : trace.steps) {
+        std::cout << decode_word(step.guess) << ' ';
+      }
+      std::cout << "\n";
+    }
   } else {
     std::cerr << "Invalid arguments." << std::endl;
     std::cerr << "Usage: " << argv[0] << " --word <target_word> [--hard-mode]"
