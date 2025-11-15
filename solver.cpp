@@ -1,4 +1,4 @@
-// (Existing functions: encode_word, decode_word, load_word_list_encoded, get_char_code_at, calculate_feedback_encoded, filter_word_list_encoded)
+// (Existing functions: encode_word, decode_word, get_char_code_at, calculate_feedback_encoded, filter_word_list_encoded)
 
 /**
  * solver.cpp - A highly optimized, multithreaded Wordle solver in C++.
@@ -27,16 +27,19 @@
 #include <iostream>
 #include <vector>
 #include <string>
-#include <fstream>
 #include <unordered_map>
 #include <string_view>
 #include <numeric>
 #include <algorithm>
+#include <iterator>
 #include <limits>
 #include <thread>
 #include <future>
 #include <chrono>
 #include <array>
+#include <cstdint>
+#include "word_lists.h"
+#include "opening_table.h"
 
 // --- Type Definitions for Optimization ---
 using encoded_word = uint64_t;
@@ -66,24 +69,24 @@ std::string decode_word(encoded_word encoded) {
     return word;
 }
 
-// --- Core Logic (Operating on Encoded Data) ---
-
-// Loads a word list from a text file and returns a vector of encoded words.
-std::vector<encoded_word> load_word_list_encoded(const std::string& path) {
-    std::ifstream file(path);
-    std::vector<encoded_word> words;
-    std::string line;
-    if (!file.is_open()) {
-        std::cerr << "Error: Word list file not found at '" << path << "'" << std::endl;
-        return words;
-    }
-    while (std::getline(file, line)) {
-        if (line.length() == 5) {
-            words.push_back(encode_word(line));
-        }
-    }
-    return words;
+std::vector<encoded_word> load_answers() {
+    return std::vector<encoded_word>(std::begin(kEncodedAnswers), std::end(kEncodedAnswers));
 }
+
+std::vector<encoded_word> load_guesses() {
+    return std::vector<encoded_word>(std::begin(kEncodedGuesses), std::end(kEncodedGuesses));
+}
+
+constexpr encoded_word kInitialGuess = encode_word("roate");
+
+encoded_word lookup_second_guess(feedback_int feedback) {
+    if (feedback < 0 || feedback >= static_cast<feedback_int>(std::size(kSecondGuessTable))) {
+        return 0;
+    }
+    return static_cast<encoded_word>(kSecondGuessTable[feedback]);
+}
+
+// --- Core Logic (Operating on Encoded Data) ---
 
 // Helper to get the encoded character (1-26) at a specific position (0-4).
 inline uint8_t get_char_code_at(encoded_word word, int pos) {
@@ -247,8 +250,8 @@ encoded_word find_best_guess_encoded(
         guesses_to_check = &valid_hard_mode_guesses;
     }
 
-    constexpr size_t kSmallSearchThreshold = 64;
-    if (possible_words.size() <= kSmallSearchThreshold) {
+    constexpr size_t kAnswerOnlyThreshold = 1024;
+    if (possible_words.size() <= kAnswerOnlyThreshold) {
         guesses_to_check = &possible_words;
     }
 
@@ -303,10 +306,17 @@ void run_non_interactive(
         std::cout << "Turn " << turn << " (" << possible_words.size() << " possibilities remain)" << std::endl;
 
         if (turn == 1) {
-            guess = encode_word("roate");
+            guess = kInitialGuess;
         } else {
             if (possible_words.size() == 1) {
                 guess = possible_words[0];
+            } else if (!hard_mode && turn == 2) {
+                const encoded_word precomputed = lookup_second_guess(feedback_val);
+                if (precomputed != 0) {
+                    guess = precomputed;
+                } else {
+                    guess = find_best_guess_encoded(possible_words, all_words, hard_mode, guess, feedback_val);
+                }
             } else {
                 guess = find_best_guess_encoded(possible_words, all_words, hard_mode, guess, feedback_val);
             }
@@ -374,8 +384,8 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    const auto answers = load_word_list_encoded("official_answers.txt");
-    const auto guesses = load_word_list_encoded("official_guesses.txt");
+    const auto answers = load_answers();
+    const auto guesses = load_guesses();
 
     if (answers.empty()) {
         std::cerr << "Could not load official answers list. Exiting." << std::endl;
