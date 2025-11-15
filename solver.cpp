@@ -36,6 +36,7 @@
 #include <thread>
 #include <future>
 #include <chrono>
+#include <array>
 
 // --- Type Definitions for Optimization ---
 using encoded_word = uint64_t;
@@ -192,24 +193,28 @@ bool is_valid_hard_mode_guess(encoded_word potential_guess, encoded_word previou
 
 // The worker task for std::async to find the best guess in a subset of words.
 std::pair<encoded_word, double> find_best_guess_worker(
-    const std::vector<encoded_word> possible_words,
-    const std::vector<encoded_word> guess_subset) 
+    const std::vector<encoded_word>& possible_words,
+    const std::vector<encoded_word>& guess_subset) 
 {
     encoded_word local_best_guess = 0;
     double local_min_score = std::numeric_limits<double>::max();
 
     for (const auto& guess : guess_subset) {
-        std::unordered_map<feedback_int, int> feedback_groups;
-        for (const auto& answer : possible_words) {
-            feedback_groups[calculate_feedback_encoded(guess, answer)]++;
-        }
-
+        std::array<int, 243> feedback_groups{};
         double current_score = 0.0;
-        for (const auto& pair : feedback_groups) {
-            current_score += static_cast<double>(pair.second * pair.second);
+        bool pruned = false;
+        for (const auto& answer : possible_words) {
+            const feedback_int feedback = calculate_feedback_encoded(guess, answer);
+            const int count_before = feedback_groups[feedback];
+            current_score += static_cast<double>(2 * count_before + 1);
+            feedback_groups[feedback] = count_before + 1;
+            if (current_score >= local_min_score) {
+                pruned = true;
+                break;
+            }
         }
 
-        if (current_score < local_min_score) {
+        if (!pruned && current_score < local_min_score) {
             local_min_score = current_score;
             local_best_guess = guess;
         }
@@ -240,6 +245,11 @@ encoded_word find_best_guess_encoded(
             }
         }
         guesses_to_check = &valid_hard_mode_guesses;
+    }
+
+    constexpr size_t kSmallSearchThreshold = 64;
+    if (possible_words.size() <= kSmallSearchThreshold) {
+        guesses_to_check = &possible_words;
     }
 
     unsigned int num_threads = std::thread::hardware_concurrency();
