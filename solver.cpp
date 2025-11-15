@@ -87,38 +87,7 @@ std::vector<encoded_word> load_word_list_encoded(const std::string& path) {
     return words;
 }
 
-std::array<encoded_word, 243> load_second_guess_table(const std::string& path) {
-    std::array<encoded_word, 243> table{};
-    std::ifstream file(path);
-    std::string line;
-    if (!file.is_open()) {
-        std::cerr << "Warning: Could not load second-guess table from '" << path << "'. Using fallback search." << std::endl;
-        return table;
-    }
-
-    size_t index = 0;
-    while (index < table.size() && std::getline(file, line)) {
-        if (!line.empty() && line.back() == '\r') {
-            line.pop_back();
-        }
-        if (line.length() == 5) {
-            table[index] = encode_word(line);
-        } else {
-            table[index] = 0;
-        }
-        ++index;
-    }
-    return table;
-}
-
 constexpr encoded_word kInitialGuess = encode_word("roate");
-
-encoded_word lookup_second_guess(feedback_int feedback, const std::array<encoded_word, 243>& table) {
-    if (feedback < 0 || feedback >= static_cast<feedback_int>(table.size())) {
-        return 0;
-    }
-    return table[feedback];
-}
 
 // --- Core Logic (Operating on Encoded Data) ---
 
@@ -326,13 +295,21 @@ void run_non_interactive(
     encoded_word answer, 
     const std::vector<encoded_word>& answers, 
     const std::vector<encoded_word>& all_words,
-    bool hard_mode,
-    const std::array<encoded_word, 243>& second_guess_table) 
+    bool hard_mode) 
 {
     auto possible_words = answers;
     int turn = 1;
     encoded_word guess = 0;
     feedback_int feedback_val = 0;
+
+    std::array<std::vector<encoded_word>, 243> roate_partitions;
+    std::array<encoded_word, 243> second_guess_cache{};
+    if (!hard_mode) {
+        for (const auto& candidate : answers) {
+            const feedback_int fb = calculate_feedback_encoded(kInitialGuess, candidate);
+            roate_partitions[fb].push_back(candidate);
+        }
+    }
 
     std::cout << "Solving for: " << decode_word(answer) << (hard_mode ? " (Hard Mode)" : "") << std::endl;
     std::cout << "------------------------------" << std::endl;
@@ -346,12 +323,18 @@ void run_non_interactive(
             if (possible_words.size() == 1) {
                 guess = possible_words[0];
             } else if (!hard_mode && turn == 2) {
-                const encoded_word precomputed = lookup_second_guess(feedback_val, second_guess_table);
-                if (precomputed != 0) {
-                    guess = precomputed;
-                } else {
-                    guess = find_best_guess_encoded(possible_words, all_words, hard_mode, guess, feedback_val);
+                encoded_word& cached = second_guess_cache[feedback_val];
+                if (cached == 0) {
+                    const auto& subset = roate_partitions[feedback_val];
+                    if (subset.empty()) {
+                        cached = find_best_guess_encoded(possible_words, all_words, false, kInitialGuess, feedback_val);
+                    } else if (subset.size() == 1) {
+                        cached = subset[0];
+                    } else {
+                        cached = find_best_guess_encoded(subset, all_words, false, kInitialGuess, feedback_val);
+                    }
                 }
+                guess = cached;
             } else {
                 guess = find_best_guess_encoded(possible_words, all_words, hard_mode, guess, feedback_val);
             }
@@ -455,8 +438,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        const auto second_guess_table = load_second_guess_table("opening_second_guesses.txt");
-        run_non_interactive(encoded_answer, answers, all_words, hard_mode, second_guess_table);
+        run_non_interactive(encoded_answer, answers, all_words, hard_mode);
     } else {
         std::cerr << "Invalid arguments." << std::endl;
         std::cerr << "Usage: " << argv[0] << " --word <target_word> [--hard-mode]" << std::endl;
