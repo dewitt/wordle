@@ -41,7 +41,6 @@ int main(int argc, char *argv[]) {
   std::cin.tie(nullptr);
 
   bool debug_flag = false;
-  bool hard_mode = false;
   bool dump_json = false;
   bool disable_lookup = false;
   bool rebuild_feedback_table = false;
@@ -60,10 +59,6 @@ int main(int argc, char *argv[]) {
     }
     if (arg == "--debug") {
       debug_flag = true;
-      continue;
-    }
-    if (arg == "--hard-mode") {
-      hard_mode = true;
       continue;
     }
     if (arg == "--disable-lookup") {
@@ -216,7 +211,7 @@ int main(int argc, char *argv[]) {
 
   PrecomputedLookup lookup_table;
   const PrecomputedLookup *lookup_ptr = nullptr;
-  if (!hard_mode && !disable_lookup &&
+  if (!disable_lookup &&
       lookup_table.load("lookup_roate.bin", kInitialGuess)) {
     lookup_ptr = &lookup_table;
   }
@@ -235,8 +230,8 @@ int main(int argc, char *argv[]) {
 
     const auto start_time = std::chrono::high_resolution_clock::now();
     const encoded_word best_word =
-        find_best_guess_encoded(indices, words, false, 0, 0, feedback_ptr,
-                                lookups, load_word_weights());
+        find_best_guess_encoded(indices, words, feedback_ptr, lookups,
+                                load_word_weights());
     const auto end_time = std::chrono::high_resolution_clock::now();
     const std::chrono::duration<double> elapsed = end_time - start_time;
 
@@ -253,8 +248,8 @@ int main(int argc, char *argv[]) {
   }
 
   SolutionTrace trace;
-  run_non_interactive(encoded_answer, words, hard_mode, debug_flag, !dump_json,
-                      &trace, debug_flag, feedback_ptr, lookups, lookup_ptr);
+  run_non_interactive(encoded_answer, words, debug_flag, !dump_json, &trace,
+                      debug_flag, feedback_ptr, lookups, lookup_ptr);
 
   if (dump_json) {
     std::cout << "[";

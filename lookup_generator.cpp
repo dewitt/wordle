@@ -6,9 +6,153 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <numeric>
+#include <optional>
+#include <tuple>
+#include <unordered_map>
 
 #include "solver_runtime.h"
+
+namespace {
+
+constexpr uint32_t kLookaheadDepth = 0;
+
+class CandidateBitset {
+public:
+  CandidateBitset() = default;
+  explicit CandidateBitset(size_t word_count)
+      : bits_((word_count + 63) / 64, 0) {}
+
+  static CandidateBitset FromIndices(const std::vector<size_t> &indices,
+                                     size_t word_count) {
+    CandidateBitset mask(word_count);
+    for (const size_t idx : indices) {
+      mask.set(idx);
+    }
+    return mask;
+  }
+
+  size_t count() const { return count_; }
+  const std::vector<uint64_t> &bits() const { return bits_; }
+
+private:
+  void set(size_t idx) {
+    const size_t bucket = idx / 64;
+    const uint64_t bit = uint64_t{1} << (idx % 64);
+    uint64_t &slot = bits_[bucket];
+    if ((slot & bit) == 0) {
+      slot |= bit;
+      ++count_;
+    }
+  }
+
+  std::vector<uint64_t> bits_;
+  size_t count_ = 0;
+};
+
+struct MemoKey {
+  std::vector<uint64_t> bits;
+  uint32_t depth = 0;
+
+  bool operator==(const MemoKey &other) const noexcept {
+    return depth == other.depth && bits == other.bits;
+  }
+};
+
+struct MemoKeyHash {
+  size_t operator()(const MemoKey &key) const noexcept {
+    size_t h = key.depth;
+    for (const uint64_t word : key.bits) {
+      h ^= std::hash<uint64_t>{}(word) + 0x9e3779b97f4a7c15ULL + (h << 6) +
+           (h >> 2);
+    }
+    return h;
+  }
+};
+
+class GenerationMemo {
+public:
+  std::optional<uint32_t> find(const CandidateBitset &mask,
+                               uint32_t depth) const {
+    MemoKey probe;
+    probe.depth = depth;
+    probe.bits = mask.bits();
+    const auto it = cache_.find(probe);
+    if (it == cache_.end()) {
+      return std::nullopt;
+    }
+    return it->second;
+  }
+
+  void store(const CandidateBitset &mask, uint32_t depth, uint32_t offset) {
+    MemoKey key;
+    key.depth = depth;
+    key.bits = mask.bits();
+    cache_.emplace(std::move(key), offset);
+  }
+
+private:
+  std::unordered_map<MemoKey, uint32_t, MemoKeyHash> cache_;
+};
+
+encoded_word choose_best_guess(const std::vector<size_t> &indices,
+                               const std::vector<encoded_word> &words,
+                               const FeedbackTable *feedback_table,
+                               const LookupTables &lookups,
+                               const std::vector<uint32_t> &weights,
+                               uint32_t lookahead_depth) {
+  (void)lookahead_depth; // Placeholder for deeper scoring.
+  if (indices.empty())
+    return 0;
+  encoded_word best_guess = 0;
+  size_t best_worst = std::numeric_limits<size_t>::max();
+  size_t best_spread = std::numeric_limits<size_t>::max();
+  int64_t best_weight = -1;
+
+  std::array<size_t, 243> counts{};
+  for (size_t guess_idx = 0; guess_idx < words.size(); ++guess_idx) {
+    counts.fill(0);
+    if (feedback_table && feedback_table->loaded()) {
+      const uint8_t *row = feedback_table->row(guess_idx);
+      for (const auto idx : indices) {
+        counts[row[idx]]++;
+      }
+    } else {
+      encoded_word guess = words[guess_idx];
+      for (const auto idx : indices) {
+        const feedback_int fb =
+            calculate_feedback_encoded(guess, words[idx]);
+        counts[fb]++;
+      }
+    }
+
+    size_t worst = 0;
+    size_t spread = 0;
+    for (const auto cnt : counts) {
+      if (cnt == 0)
+        continue;
+      worst = std::max(worst, cnt);
+      spread += cnt * cnt;
+    }
+
+    const int64_t weight = weights[guess_idx];
+    const auto candidate =
+        std::make_tuple(worst, spread, -static_cast<int64_t>(weight));
+    const auto current =
+        std::make_tuple(best_worst, best_spread, -best_weight);
+    if (!best_guess || candidate < current) {
+      best_guess = words[guess_idx];
+      best_worst = worst;
+      best_spread = spread;
+      best_weight = weight;
+    }
+  }
+
+  return best_guess;
+}
+
+} // namespace
 
 bool generate_lookup_table(const std::string &path,
                            const std::vector<encoded_word> &words,
@@ -31,9 +175,18 @@ bool generate_lookup_table(const std::string &path,
   std::vector<uint8_t> buffer;
   buffer.reserve(1 << 20);
 
-  std::function<uint32_t(const std::vector<size_t> &, encoded_word, uint32_t)>
-      write_node = [&](const std::vector<size_t> &indices, encoded_word guess,
+  const size_t word_count = words.size();
+  GenerationMemo memo;
+
+  std::function<uint32_t(const std::vector<size_t> &, const CandidateBitset &,
+                         encoded_word, uint32_t)>
+      write_node = [&](const std::vector<size_t> &indices,
+                       const CandidateBitset &mask, encoded_word guess,
                        uint32_t remaining_depth) -> uint32_t {
+    if (const auto cached = memo.find(mask, remaining_depth)) {
+      return *cached;
+    }
+
     std::array<std::vector<size_t>, 243> partitions;
     for (const auto idx : indices) {
       const feedback_int fb = calculate_feedback_encoded(guess, words[idx]);
@@ -75,14 +228,12 @@ bool generate_lookup_table(const std::string &path,
         entries.push_back({fb, 0, {}});
         continue;
       }
-      if (feedback_table && feedback_table->loaded()) {
-        next = find_best_guess_encoded(subset, words, false, guess, fb,
-                                       feedback_table, lookups, weights);
-      }
-      if (next == 0) {
-        next = find_best_guess_encoded(subset, words, false, guess, fb, nullptr,
-                                       lookups, weights);
-      }
+      const uint32_t lookahead =
+          remaining_depth > 1
+              ? std::min<uint32_t>(kLookaheadDepth, remaining_depth - 1)
+              : 0;
+      next = choose_best_guess(subset, words, feedback_table, lookups, weights,
+                               lookahead);
       entries.push_back({fb, next, subset});
     }
 
@@ -112,20 +263,27 @@ bool generate_lookup_table(const std::string &path,
       uint32_t child_offset = 0;
       if (remaining_depth > 1 && entry.subset.size() > 1 &&
           entry.next_guess != 0) {
-        child_offset = HEADER_SIZE + write_node(entry.subset, entry.next_guess,
-                                                remaining_depth - 1);
+        CandidateBitset child_mask =
+            CandidateBitset::FromIndices(entry.subset, word_count);
+        child_offset =
+            HEADER_SIZE +
+            write_node(entry.subset, child_mask, entry.next_guess,
+                       remaining_depth - 1);
       }
       std::memcpy(buffer.data() + child_positions[idx], &child_offset,
                   sizeof(child_offset));
     }
 
+    memo.store(mask, remaining_depth, node_offset);
     return node_offset;
   };
 
   std::vector<size_t> root_indices(words.size());
   std::iota(root_indices.begin(), root_indices.end(), 0);
+  CandidateBitset root_mask =
+      CandidateBitset::FromIndices(root_indices, word_count);
   uint32_t root_offset =
-      write_node(root_indices, start, depth > 0 ? depth - 1 : 0);
+      write_node(root_indices, root_mask, start, depth > 0 ? depth - 1 : 0);
 
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
   if (!out) {

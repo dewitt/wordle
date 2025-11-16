@@ -29,7 +29,7 @@ For additional performance the solver uses a few precomputed assets:
 
 The `solver` binary exposes four explicit modes so you always know which workflow is active:
 
-- `solve <word>`: non-interactively solve a single target. Pass `--debug` for verbose, turn-by-turn output plus lookup diagnostics, `--hard-mode` to enforce Wordle hard mode rules, and `--dump-json` to emit a structured trace instead of human-readable text.
+- `solve <word>`: non-interactively solve a single target. Pass `--debug` for verbose, turn-by-turn output plus lookup diagnostics, and `--dump-json` to emit a structured trace instead of human-readable text.
 - `start`: exhaustively analyze all guesses to report the best opening word.
 - `generate`: build `lookup_<word>.bin` files (and optionally rebuild `feedback_table.bin`) entirely inside the C++ binary. Flags such as `--lookup-depth` (default 6), `--lookup-output`, `--lookup-start`, and `--feedback-table` customize the generated assets. You must run this mode at least once (to produce `lookup_roate.bin`) before using `solve`.
 - `help`: display a concise usage summary. `--help` is equivalent and may appear anywhere.
@@ -41,7 +41,7 @@ The project is now organized into focused translation units so future changes ar
 - `solver_main.cpp` – parses CLI flags, dispatches to modes, and glues the other modules together.
 - `solver_runtime.{h,cpp}` – loads `lookup_<start>.bin` and streams guesses from the sparse tree. Contains `run_non_interactive` plus the binary header definition.
 - `lookup_generator.{h,cpp}` – rebuilds lookup trees inside the solver binary (still using the legacy heuristic while we iterate on NEW_DESIGN.md).
-- `solver_core.{h,cpp}` – shared algorithms such as feedback computation, hard-mode checking, and the multithreaded entropy search helper that generation still leans on.
+- `solver_core.{h,cpp}` – shared algorithms such as feedback computation and the multithreaded entropy search helper that generation still leans on.
 - `feedback_cache.{h,cpp}` – memory-maps or rebuilds `feedback_table.bin`.
 - `words_data.{h,cpp}` – owns the encoded word list, encoding helpers, and letter-frequency weights.
 - `solver_types.h` – centralizes common typedefs so every module speaks the same API.

@@ -45,7 +45,7 @@ private:
 };
 
 void run_non_interactive(encoded_word answer,
-                         const std::vector<encoded_word> &words, bool hard_mode,
+                         const std::vector<encoded_word> &words,
                          bool verbose, bool print_output, SolutionTrace *trace,
                          bool debug_lookup, const FeedbackTable *feedback_table,
                          const LookupTables &lookups,

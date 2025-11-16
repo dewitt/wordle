@@ -5,7 +5,7 @@
 - `solver_main.cpp` routes CLI modes (`solve`, `start`, `generate`, `help`) and holds zero business logic beyond flag parsing.
 - `words_data.{h,cpp}` exposes the embedded dictionary (`kEncodedWords`), the encode/decode helpers, and the letter-frequency weighting table used for tie-breakers.
 - `feedback_cache.{h,cpp}` implements the optional `feedback_table.bin` cache plus the `FeedbackTable` helper used by entropy sampling during generation.
-- `solver_core.{h,cpp}` contains the reusable algorithms: feedback math, hard-mode validation, entropy-based `find_best_guess_encoded`, and the `LookupTables` (word → index) helper.
+- `solver_core.{h,cpp}` contains the reusable algorithms: feedback math, entropy-based `find_best_guess_encoded`, and the `LookupTables` (word → index) helper.
 - `solver_runtime.{h,cpp}` loads `lookup_<start>.bin`, defines the file header/entry structures, and exposes `run_non_interactive`.
 - `lookup_generator.{h,cpp}` builds the sparse lookup trees using the shared core routines and serializes them via the runtime’s header/entry definitions.
 - `solver_types.h` centralizes shared typedefs (`encoded_word`, `feedback_int`) so every module agrees on data representations.
@@ -41,8 +41,7 @@ This split keeps the CLI lightweight and ensures generator/runtime changes can b
 The `solver` binary accepts a primary mode followed by flag arguments:
 
 - `solve <word>` – one-shot solve of a target from `words.txt`. Flags:
-  `--hard-mode`, `--debug` (verbose output + lookup diagnostics),
-  `--dump-json`.
+  `--debug` (verbose output + lookup diagnostics), `--dump-json`.
 - `start` – exhaustively analyze all words to report the best opening word.
   Primarily used when experimenting with new heuristics or data sets.
 - `generate` – create auxiliary assets. Flags: `--lookup-start`,

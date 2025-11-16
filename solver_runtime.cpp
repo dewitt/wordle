@@ -61,12 +61,11 @@ const uint8_t *PrecomputedLookup::find_child(const uint8_t *node,
 }
 
 void run_non_interactive(encoded_word answer,
-                         const std::vector<encoded_word> &words, bool hard_mode,
+                         const std::vector<encoded_word> &words,
                          bool verbose, bool print_output, SolutionTrace *trace,
                          bool debug_lookup, const FeedbackTable *,
                          const LookupTables &, const PrecomputedLookup *tree) {
   (void)words;
-  (void)hard_mode;
   if (!tree || !tree->root()) {
     std::cerr << "Error: precomputed lookup table is required for solving.\n";
     return;
@@ -87,8 +86,7 @@ void run_non_interactive(encoded_word answer,
   const uint8_t *node = tree->root();
 
   if (verbose && print_output) {
-    std::cout << "Solving for: " << decode_word(answer)
-              << (hard_mode ? " (Hard Mode)" : "") << std::endl;
+    std::cout << "Solving for: " << decode_word(answer) << std::endl;
     std::cout << "------------------------------" << std::endl;
   }
 

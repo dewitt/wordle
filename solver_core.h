@@ -23,13 +23,8 @@ std::vector<size_t> filter_candidate_indices(
     feedback_int feedback, const FeedbackTable *feedback_table,
     const LookupTables &lookups, const std::vector<encoded_word> &words);
 
-bool is_valid_hard_mode_guess(encoded_word potential_guess,
-                              encoded_word previous_guess,
-                              feedback_int previous_feedback);
-
 encoded_word find_best_guess_encoded(
     const std::vector<size_t> &possible_indices,
-    const std::vector<encoded_word> &words, bool hard_mode,
-    encoded_word previous_guess, feedback_int previous_feedback,
+    const std::vector<encoded_word> &words,
     const FeedbackTable *feedback_table, const LookupTables &lookups,
     const std::vector<uint32_t> &weights);
