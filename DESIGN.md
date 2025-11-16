@@ -1,10 +1,35 @@
+# Design Overview
+
+## Runtime architecture
+
+1. **Word encoding** – `words.txt` is embedded in `word_lists.h` as `kEncodedWords`. Each five-letter word is encoded in 25 bits (5 bits/letter) so comparisons and table lookups can operate entirely on integers.
+2. **Lookup tables** – At startup the solver builds an `unordered_map` (`LookupTables::word_index`) from encoded word → row/column index. This single map feeds the feedback cache, lookup tables, and CLI validation.
+3. **Feedback computation** – `calculate_feedback_encoded` matches the official Wordle rules by running two passes (greens, then yellows) over the encoded letters. Hot paths fetch precomputed values from `feedback_table.bin`; cold paths fall back to this routine.
+4. **Search** – `find_best_guess_encoded` partitions the remaining possibilities for each candidate guess, scoring them by entropy (sum of squares). The work is distributed across all CPU cores with `std::async`. Hard-mode filtering and small-search optimizations (only evaluate the remaining candidates) keep the state space manageable.
+5. **Lookup acceleration** – Optional `lookup_<start>.bin` files store a sparse prefix tree of optimal guesses for the default starting word. During a solve the binary walks this tree before falling back to the entropy search.
+
+## Command-line interface
+
+The `solver` binary accepts a primary mode followed by flag arguments:
+
+- `solve <word>` – one-shot solve of a target from `words.txt`. Flags: `--hard-mode`, `--debug` (verbose output + lookup diagnostics), `--disable-lookup`, `--dump-json`.
+- `start` – exhaustively analyze all words to report the best opening word. Primarily used when experimenting with new heuristics or data sets.
+- `generate` – create auxiliary assets. Flags: `--lookup-start`, `--lookup-depth`, `--lookup-output`, and `--feedback-table` (rebuilds `feedback_table.bin` first).
+- `help` / `--help` – print usage.
+
+All flags are mode-agnostic and may appear before or after the mode token. `--feedback-table` is honored by every mode so you can refresh caches while solving or benchmarking.
+
+## Benchmarking workflow
+
+`benchmark.py` times the solver across a subset of `official_answers.txt` to keep historical comparisons consistent. Although the solver never consults `official_answers.txt`, we retain the file to drive benchmarks and to double-check regression results. The canonical runtime vocabulary is `words.txt` (the union of official answers and guesses).
+
+# Word Sources
+
+- `words.txt` contains every valid guess (official answers ∪ guesses). The build embeds this list in `word_lists.h`, so solver logic never needs to read the historical answer set directly. Tools like `benchmark.py` may still open `official_answers.txt` to pick historical targets, but the solver only sees the unified vocabulary.
+
 # Lookup Table Format
 
 Binary files `lookup_<start>.bin` encode a sparse feedback tree for a fixed start word. All integers are little-endian.
-
-## Word Sources
-
-`words.txt` contains every valid guess (official answers ∪ guesses). The build embeds this list in `word_lists.h`, so solver logic never needs to read the historical answer set directly. Tools like `benchmark.py` may still open `official_answers.txt` to pick historical targets, but the solver only sees the unified vocabulary.
 
 ## Header (32 bytes)
 ```
@@ -34,10 +59,10 @@ Entries are sorted by `feedback`. Offsets point to other nodes within the same f
 ## Generator semantics
 
 - Generation lives in the solver binary (`./build/solver generate --lookup-start roate --lookup-depth N --lookup-output lookup_roate.bin`).
-- For each node/state (defined by a feedback history), the generator filters the answer indices to what remains viable:
+- For each node/state (defined by a feedback history), the generator filters the candidate indices to what remains viable:
   * If the subset is empty, no entry is emitted for that feedback.
-  * If subset size is 1, the guess stored is that remaining answer.
-  * Otherwise, it runs `find_best_guess_encoded` to choose the optimal next guess.
+  * If subset size is 1, the guess stored is that remaining word.
+  * Otherwise, it runs `find_best_guess_encoded` to choose the optimal next guess (reusing `feedback_table.bin` when available).
 - This process repeats recursively until the requested depth is reached; the last stored guess corresponds to the depth-th turn (start word counts as turn 1).
 - Because every possible feedback code (0..242) is iterated, the resulting tree covers all branches for the selected depth. Runtime lookup never needs to revert to entropy search until it exhausts the precomputed depth.
 
