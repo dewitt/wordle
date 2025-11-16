@@ -52,7 +52,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
-#include "opening_table.h"
 #include "word_lists.h"
 
 // --- Type Definitions for Optimization ---
@@ -560,7 +559,7 @@ void print_usage(const char *prog_name) {
       << "  --disable-lookup  Ignore precomputed lookup tables (solve mode).\n"
       << "  --dump-json       Emit a JSON trace for solve mode instead of "
          "text.\n"
-      << "  --lookup-depth N  Depth for lookup generation (default: 4).\n"
+      << "  --lookup-depth N  Depth for lookup generation (default: 6).\n"
       << "  --lookup-output FILE  Output path for lookup table (default: "
          "lookup_<word>.bin).\n"
       << "  --lookup-start WORD   Start word when generating lookups "
@@ -620,24 +619,6 @@ void run_non_interactive(encoded_word answer,
     if (!used_lookup) {
       if (turn == 1) {
         guess = kInitialGuess;
-      } else if (!hard_mode && turn == 2) {
-        const encoded_word precomputed_guess = kSecondGuessTable[feedback_val];
-        if (precomputed_guess != 0) {
-          if (debug_lookup) {
-            std::cerr << "[lookup-k2] fb=" << feedback_val
-                      << " guess=" << decode_word(precomputed_guess) << "\n";
-          }
-          guess = precomputed_guess;
-          lookup_node = nullptr;
-        } else {
-          if (debug_lookup) {
-            std::cerr << "[fallback] depth=2 fb=" << feedback_val << "\n";
-          }
-          guess =
-              find_best_guess_encoded(possible_indices, words, hard_mode, guess,
-                                      feedback_val, feedback_table, lookups);
-          lookup_node = nullptr;
-        }
       } else if (possible_indices.size() == 1) {
         guess = words[possible_indices[0]];
       } else {
@@ -716,7 +697,7 @@ int main(int argc, char *argv[]) {
   bool dump_json = false;
   bool disable_lookup = false;
   bool rebuild_feedback_table = false;
-  uint32_t lookup_depth = 4;
+  uint32_t lookup_depth = 6;
   std::string lookup_output;
   encoded_word lookup_start = kInitialGuess;
 

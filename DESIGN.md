@@ -14,7 +14,7 @@ The `solver` binary accepts a primary mode followed by flag arguments:
 
 - `solve <word>` – one-shot solve of a target from `words.txt`. Flags: `--hard-mode`, `--debug` (verbose output + lookup diagnostics), `--disable-lookup`, `--dump-json`.
 - `start` – exhaustively analyze all words to report the best opening word. Primarily used when experimenting with new heuristics or data sets.
-- `generate` – create auxiliary assets. Flags: `--lookup-start`, `--lookup-depth`, `--lookup-output`, and `--feedback-table` (rebuilds `feedback_table.bin` first).
+- `generate` – create auxiliary assets. Flags: `--lookup-start`, `--lookup-depth` (default 6), `--lookup-output`, and `--feedback-table` (rebuilds `feedback_table.bin` first).
 - `help` / `--help` – print usage.
 
 All flags are mode-agnostic and may appear before or after the mode token. `--feedback-table` is honored by every mode so you can refresh caches while solving or benchmarking.
@@ -68,7 +68,7 @@ Entries are sorted by `feedback`. Offsets point to other nodes within the same f
 
 ## Regeneration
 ```
-./build/solver generate --lookup-start roate --lookup-depth 4 --lookup-output lookup_roate.bin
+./build/solver generate --lookup-start roate --lookup-depth 6 --lookup-output lookup_roate.bin
 ```
 The solver filters candidates and runs the search internally for each branch, ensuring the lookup mirrors the exact runtime behavior. Adjust `--lookup-start`, `--lookup-depth`, and `--lookup-output` as needed.
 

@@ -20,9 +20,9 @@ This project serves as a case study in C++ performance optimization, demonstrati
 
 For additional performance the solver uses a few precomputed assets:
 
-- `word_lists.h` and `opening_table.h` are generated once from `words.txt` (plus optional heuristics) and embedded directly into the binary. You generally do not need to touch these files, but keep `words.txt` up to date so the embedded data stays accurate.
+- `word_lists.h` is generated once from `words.txt` and embedded directly into the binary. You generally do not need to touch this file, but keep `words.txt` up to date so the embedded data stays accurate.
 - `feedback_table.bin` is an optional binary cache containing the results of `calculate_feedback_encoded` for every pair of valid words (≈167 MB). Refresh it by passing `--feedback-table` to any mode (for example `./build/solver generate --feedback-table`). When present, the solver memory-maps this cache at startup and skips recomputing feedback in the hot loops. If the file is absent, the solver falls back to the slower but correct on-the-fly calculations.
-- `lookup_roate.bin` is a sparse lookup table capturing the optimal next guesses for the default start word (`roate`). Generate it via the solver itself: `./build/solver generate --lookup-start roate --lookup-depth 4 --lookup-output lookup_roate.bin`. The solver automatically loads this file (when present) and follows the precomputed tree before falling back to the entropy search. Delete the file if you want to force the solver to recompute guesses dynamically.
+- `lookup_roate.bin` is a sparse lookup table capturing the optimal next guesses for the default start word (`roate`). Generate it via the solver itself: `./build/solver generate --lookup-start roate --lookup-depth 6 --lookup-output lookup_roate.bin`. The solver automatically loads this file (when present) and follows the precomputed tree before falling back to the entropy search. Delete the file if you want to force the solver to recompute guesses dynamically.
 
 ## Modes of Operation
 
@@ -75,5 +75,5 @@ Examples:
 ./build/solver start
 
 # Build a depth-4 lookup tree for ROATE and refresh feedback_table.bin
-./build/solver generate --lookup-start roate --lookup-depth 4 --lookup-output lookup_roate.bin --feedback-table
+./build/solver generate --lookup-start roate --lookup-depth 6 --lookup-output lookup_roate.bin --feedback-table
 ```
