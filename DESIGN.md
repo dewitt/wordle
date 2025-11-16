@@ -2,6 +2,10 @@
 
 Binary files `lookup_<start>.bin` encode a sparse feedback tree for a fixed start word. All integers are little-endian.
 
+## Word Sources
+
+`words.txt` contains every valid guess (official answers ∪ guesses). The build embeds this list in `word_lists.h`, so solver logic never needs to read the historical answer set directly. Tools like `benchmark.py` may still open `official_answers.txt` to pick historical targets, but the solver only sees the unified vocabulary.
+
 ## Header (32 bytes)
 ```
 struct Header {
@@ -45,10 +49,10 @@ The solver filters candidates and runs the search internally for each branch, en
 
 # Feedback Cache Format (`feedback_table.bin`)
 
-`feedback_table.bin` caches the result of `calculate_feedback_encoded(guess, answer)` for every allowed guess (rows) against every official answer (columns). The layout is intentionally minimal to keep the file small (~29 MB) and fast to mmap:
+`feedback_table.bin` caches the result of `calculate_feedback_encoded` for every ordered pair of valid words drawn from `words.txt`. The layout stays minimal so it can be memory-mapped efficiently (~167 MB for 12,947² entries):
 
-- No header; the size implicitly equals `guess_count * answer_count` bytes.
-- Rows are ordered exactly like `load_all_words()`; columns follow `load_answers()`.
+- No header; the size implicitly equals `kWordsCount * kWordsCount` bytes.
+- Rows and columns follow the exact order of `words.txt` (and therefore `kEncodedWords`).
 - Each byte stores a single feedback code in `uint8_t` form (0–242), identical to the runtime base-3 encoding (`ggggg` = 242).
 
 When present, the solver memory-maps the file and indexes it via the pre-built lookup tables, so fetching `(guess_idx, answer_idx)` is an O(1) byte read. If the file is missing or stale, rebuild it with:
