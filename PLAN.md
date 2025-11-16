@@ -1,14 +1,10 @@
-# Plan: Lookup Table Generation & Integration
+# Plan: CLI Ergonomics & Lookup Improvements
 
-1. Add TODO entries and track progress.
-2. Update DESIGN.md with exhaustive lookup requirements (header fields, node format, generator behavior).
-3. Extend solver CLI parsing (new `--generate-lookup` flag, optional `--start`, `--depth`, `--output`).
-4. Implement lookup generator inside solver:
-   - Reuse existing filtering & entropy search.
-   - Serialize tree in documented binary format.
-5. Remove Python lookup generator (tools/generate_lookup.py).
-6. Update README (new workflow for generating lookup tables).
-7. Ensure code formatting, remove unused files, clean repo.
-8. Run benchmark/tests to confirm behavior.
-9. Commit with clear message.
-
+1. Track work via TODO.md.
+2. Update solver to expose explicit modes (`solve`, `start`, `generate`, `help`) and rename binary to `solver`.
+3. Centralize flag parsing so flags are mode-independent; merge verbose/debug logging into a single `--debug`.
+4. Update docs/scripts (README, benchmark.py) and DESIGN notes for new CLI workflow.
+5. Keep lookup generation fully inside C++; remove old Python generator and provide helper `tools/dump_lookup.py`.
+6. Ensure code formatting, remove unused files, clean repo.
+7. Run benchmarks/tests (`python3 benchmark.py --limit 10`, sample solves).
+8. Commit changes with clear message.

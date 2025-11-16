@@ -29,7 +29,7 @@ Entries are sorted by `feedback`. Offsets point to other nodes within the same f
 
 ## Generator semantics
 
-- Generation lives in the solver (`--generate-lookup --start roate --depth N --output lookup_roate.bin`).
+- Generation lives in the solver binary (`./build/solver generate --lookup-start roate --lookup-depth N --lookup-output lookup_roate.bin`).
 - For each node/state (defined by a feedback history), the generator filters the answer indices to what remains viable:
   * If the subset is empty, no entry is emitted for that feedback.
   * If subset size is 1, the guess stored is that remaining answer.
@@ -39,6 +39,21 @@ Entries are sorted by `feedback`. Offsets point to other nodes within the same f
 
 ## Regeneration
 ```
-./build/solver_cpp --generate-lookup --start roate --depth 4 --output lookup_roate.bin
+./build/solver generate --lookup-start roate --lookup-depth 4 --lookup-output lookup_roate.bin
 ```
-The solver filters candidates and runs the search internally for each branch, ensuring the lookup mirrors the exact runtime behavior. Adjust `--start`, `--depth`, and `--output` as needed.
+The solver filters candidates and runs the search internally for each branch, ensuring the lookup mirrors the exact runtime behavior. Adjust `--lookup-start`, `--lookup-depth`, and `--lookup-output` as needed.
+
+# Feedback Cache Format (`feedback_table.bin`)
+
+`feedback_table.bin` caches the result of `calculate_feedback_encoded(guess, answer)` for every allowed guess (rows) against every official answer (columns). The layout is intentionally minimal to keep the file small (~29 MB) and fast to mmap:
+
+- No header; the size implicitly equals `guess_count * answer_count` bytes.
+- Rows are ordered exactly like `load_all_words()`; columns follow `load_answers()`.
+- Each byte stores a single feedback code in `uint8_t` form (0–242), identical to the runtime base-3 encoding (`ggggg` = 242).
+
+When present, the solver memory-maps the file and indexes it via the pre-built lookup tables, so fetching `(guess_idx, answer_idx)` is an O(1) byte read. If the file is missing or stale, rebuild it with:
+
+```
+./build/solver generate --feedback-table
+```
+or any other mode plus `--feedback-table`. The generator rewrites the file atomically by iterating every `(guess, answer)` pair and writing the byte matrix in row-major order.

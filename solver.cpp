@@ -30,6 +30,7 @@
  */
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -40,7 +41,6 @@
 #include <iterator>
 #include <limits>
 #include <numeric>
-#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -569,6 +569,33 @@ struct SolutionTrace {
   std::vector<SolutionStep> steps;
 };
 
+void print_usage(const char *prog_name) {
+  std::cout
+      << "Usage:\n"
+      << "  " << prog_name
+      << " solve <word> [--hard-mode] [--debug] [--disable-lookup]\n"
+      << "  " << prog_name << " start [--debug]\n"
+      << "  " << prog_name
+      << " generate [--lookup-depth N] [--lookup-output FILE]\n"
+         "         [--lookup-start WORD] [--feedback-table]\n"
+      << "  " << prog_name << " help\n\n"
+      << "Flags:\n"
+      << "  --debug           Verbose turn-by-turn output plus lookup/fallback "
+         "diagnostics.\n"
+      << "  --hard-mode       Enforce Wordle hard-mode constraints when "
+         "solving.\n"
+      << "  --disable-lookup  Ignore precomputed lookup tables (solve mode).\n"
+      << "  --dump-json       Emit a JSON trace for solve mode instead of "
+         "text.\n"
+      << "  --lookup-depth N  Depth for lookup generation (default: 4).\n"
+      << "  --lookup-output FILE  Output path for lookup table (default: "
+         "lookup_<word>.bin).\n"
+      << "  --lookup-start WORD   Start word when generating lookups "
+         "(default: roate).\n"
+      << "  --feedback-table  Rebuild feedback_table.bin before running.\n"
+      << "  --help             Show this summary.\n";
+}
+
 void run_non_interactive(encoded_word answer,
                          const std::vector<encoded_word> &answers,
                          const std::vector<encoded_word> &all_words,
@@ -607,8 +634,7 @@ void run_non_interactive(encoded_word answer,
           lookup_node, static_cast<uint16_t>(feedback_val), lookup_guess);
       if (lookup_guess != 0) {
         if (debug_lookup) {
-          std::cerr << "[lookup] depth=" << turn
-                    << " fb=" << feedback_val
+          std::cerr << "[lookup] depth=" << turn << " fb=" << feedback_val
                     << " guess=" << decode_word(lookup_guess) << "\n";
         }
         guess = lookup_guess;
@@ -645,8 +671,7 @@ void run_non_interactive(encoded_word answer,
         guess = answers[possible_indices[0]];
       } else {
         if (debug_lookup) {
-          std::cerr << "[fallback] depth=" << turn
-                    << " fb=" << feedback_val
+          std::cerr << "[fallback] depth=" << turn << " fb=" << feedback_val
                     << " subset=" << possible_indices.size() << "\n";
         }
         guess = find_best_guess_encoded(possible_indices, answers, all_words,
@@ -714,122 +739,145 @@ bool generate_lookup_table(const std::string &path,
                            const LookupTables &lookups);
 
 int main(int argc, char *argv[]) {
-  // Fast I/O
   std::ios_base::sync_with_stdio(false);
-  std::cin.tie(NULL);
+  std::cin.tie(nullptr);
 
-  if (argc < 2) {
-    std::cerr << "Usage: " << argv[0]
-              << " [--verbose] --word <target_word> [--hard-mode]\n";
-    std::cerr << "   or: " << argv[0] << " [--verbose] --find-best-start\n";
-    std::cerr << "   or: " << argv[0] << " --build-feedback-table\n";
-    return 1;
-  }
-
-  bool verbose = false;
+  bool debug_flag = false;
   bool hard_mode = false;
   bool dump_json = false;
   bool disable_lookup = false;
-  bool generate_lookup = false;
-  bool debug_lookup = false;
+  bool rebuild_feedback_table = false;
+  uint32_t lookup_depth = 4;
   std::string lookup_output;
-  uint32_t lookup_depth = 0;
   encoded_word lookup_start = kInitialGuess;
-  std::string mode;
-  std::string word_to_solve;
 
-  for (int i = 1; i < argc;) {
+  std::string mode;
+  std::vector<std::string> positional;
+
+  for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
-    if (arg == "--verbose") {
-      verbose = true;
-      ++i;
+    if (arg == "--help" || arg == "-h") {
+      print_usage(argv[0]);
+      return 0;
+    }
+    if (arg == "--debug") {
+      debug_flag = true;
       continue;
     }
     if (arg == "--hard-mode") {
       hard_mode = true;
-      ++i;
-      continue;
-    }
-    if (arg == "--dump-json") {
-      dump_json = true;
-      ++i;
       continue;
     }
     if (arg == "--disable-lookup") {
       disable_lookup = true;
-      ++i;
       continue;
     }
-    if (arg == "--generate-lookup") {
-      generate_lookup = true;
-      ++i;
+    if (arg == "--dump-json") {
+      dump_json = true;
       continue;
     }
     if (arg == "--lookup-depth") {
-      lookup_depth = static_cast<uint32_t>(std::stoul(argv[i + 1]));
-      i += 2;
+      if (i + 1 >= argc) {
+        std::cerr << "--lookup-depth requires a value.\n";
+        return 1;
+      }
+      lookup_depth = static_cast<uint32_t>(std::stoul(argv[++i]));
       continue;
     }
     if (arg == "--lookup-output") {
-      lookup_output = argv[i + 1];
-      i += 2;
+      if (i + 1 >= argc) {
+        std::cerr << "--lookup-output requires a path.\n";
+        return 1;
+      }
+      lookup_output = argv[++i];
       continue;
     }
     if (arg == "--lookup-start") {
-      std::string start_arg = argv[i + 1];
+      if (i + 1 >= argc) {
+        std::cerr << "--lookup-start requires a word.\n";
+        return 1;
+      }
+      std::string start_arg = argv[++i];
       if (start_arg.size() != 5) {
         std::cerr << "--lookup-start requires a 5-letter word.\n";
         return 1;
       }
       lookup_start = encode_word(start_arg);
-      i += 2;
       continue;
     }
-    if (arg == "--debug") {
-      debug_lookup = true;
-      ++i;
+    if (arg == "--feedback-table") {
+      rebuild_feedback_table = true;
       continue;
     }
-    if (arg == "--word") {
-      if (!mode.empty()) {
-        std::cerr << "--word cannot be combined with other modes.\n";
-        return 1;
-      }
-      mode = "--word";
-      if (i + 1 >= argc) {
-        std::cerr << "Error: --word requires a target word.\n";
-        return 1;
-      }
-      word_to_solve = argv[i + 1];
-      i += 2;
-      continue;
+    if (!arg.empty() && arg[0] == '-') {
+      std::cerr << "Unknown flag: " << arg << "\n";
+      return 1;
     }
-    if (arg == "--find-best-start" || arg == "--build-feedback-table") {
-      if (!mode.empty()) {
-        std::cerr << "Multiple modes specified.\n";
-        return 1;
-      }
+    if (mode.empty()) {
       mode = arg;
-      ++i;
-      continue;
+    } else {
+      positional.push_back(arg);
     }
-    std::cerr << "Unknown argument: " << arg << std::endl;
-    return 1;
   }
 
-  if (!generate_lookup && mode.empty()) {
+  if (mode.empty()) {
     std::cerr << "No mode specified.\n";
+    print_usage(argv[0]);
     return 1;
   }
 
-  if (generate_lookup) {
-    lookup_output = lookup_output.empty() ? "lookup_roate.bin" : lookup_output;
-    lookup_depth = lookup_depth ? lookup_depth : 4;
+  std::string normalized_mode = mode;
+  std::transform(normalized_mode.begin(), normalized_mode.end(),
+                 normalized_mode.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+
+  if (normalized_mode == "help") {
+    print_usage(argv[0]);
+    return 0;
   }
 
-  if (!generate_lookup && mode == "--word" && word_to_solve.empty()) {
-    std::cerr << "Error: --word requires a target word.\n";
+  const bool solve_mode = normalized_mode == "solve";
+  const bool start_mode = normalized_mode == "start";
+  const bool generate_mode = normalized_mode == "generate";
+
+  if (!solve_mode && !start_mode && !generate_mode) {
+    std::cerr << "Unknown mode '" << mode << "'.\n";
+    print_usage(argv[0]);
     return 1;
+  }
+
+  if (dump_json && !solve_mode) {
+    std::cerr << "--dump-json is only valid in solve mode.\n";
+    return 1;
+  }
+
+  std::string word_to_solve;
+  if (solve_mode) {
+    if (!positional.empty()) {
+      word_to_solve = positional.front();
+      positional.erase(positional.begin());
+    } else {
+      std::cerr << "solve mode requires a target word.\n";
+      return 1;
+    }
+    if (!positional.empty()) {
+      std::cerr << "Unexpected extra arguments for solve mode.\n";
+      return 1;
+    }
+  } else if (start_mode) {
+    if (!positional.empty()) {
+      std::cerr << "start mode does not take positional arguments.\n";
+      return 1;
+    }
+  } else if (generate_mode) {
+    if (!positional.empty()) {
+      if (lookup_output.empty() && positional.size() == 1) {
+        lookup_output = positional.front();
+      } else {
+        std::cerr << "Unexpected positional arguments for generate mode.\n";
+        return 1;
+      }
+    }
   }
 
   const auto &answers = load_answers();
@@ -837,44 +885,41 @@ int main(int argc, char *argv[]) {
   const LookupTables &lookups = load_lookup_tables();
 
   if (answers.empty()) {
-    std::cerr << "Embedded answers list is empty. Exiting." << std::endl;
+    std::cerr << "Embedded answers list is empty. Exiting.\n";
     return 1;
   }
 
-  const size_t answers_count = answers.size();
-  std::vector<size_t> initial_indices(answers_count);
-  std::iota(initial_indices.begin(), initial_indices.end(), 0);
-  FeedbackTable feedback_table;
-  const FeedbackTable *feedback_ptr = nullptr;
-
-  if (mode == "--build-feedback-table") {
+  if (rebuild_feedback_table) {
     if (!build_feedback_table_file(kFeedbackTablePath, answers, all_words)) {
       return 1;
     }
-    return 0;
   }
 
-  feedback_table =
-      load_feedback_table(kFeedbackTablePath, all_words.size(), answers_count);
-  if (feedback_table.loaded()) {
-    feedback_ptr = &feedback_table;
+  FeedbackTable feedback_table =
+      load_feedback_table(kFeedbackTablePath, all_words.size(), answers.size());
+  const FeedbackTable *feedback_ptr =
+      feedback_table.loaded() ? &feedback_table : nullptr;
+
+  if (!feedback_ptr) {
+    std::cerr << "Warning: feedback table not found at '" << kFeedbackTablePath
+              << "'. Falling back to slower feedback calculation.\n";
   }
 
-  if (generate_lookup) {
+  if (generate_mode) {
     if (!lookups.guess_index.count(lookup_start)) {
-      std::cerr << "Lookup start word is not in the guess list.\n";
+      std::cerr << "Lookup start word must be in the allowed guess list.\n";
       return 1;
     }
     if (lookup_output.empty()) {
-      lookup_output = "lookup_roate.bin";
+      lookup_output = "lookup_" + decode_word(lookup_start) + ".bin";
     }
     if (!generate_lookup_table(lookup_output, answers, all_words, lookup_start,
-                               lookup_depth ? lookup_depth : 4, feedback_ptr,
-                               lookups)) {
+                               lookup_depth, feedback_ptr, lookups)) {
       return 1;
     }
     return 0;
   }
+
   PrecomputedLookup lookup_table;
   const PrecomputedLookup *lookup_ptr = nullptr;
   if (!hard_mode && !disable_lookup &&
@@ -882,68 +927,54 @@ int main(int argc, char *argv[]) {
     lookup_ptr = &lookup_table;
   }
 
-  if (!feedback_ptr) {
-    std::cerr << "Warning: feedback table not found at '" << kFeedbackTablePath
-              << "'. Falling back to slower feedback calculation.\n";
-  }
-
-  if (mode == "--find-best-start") {
+  if (start_mode) {
+    std::vector<size_t> indices(answers.size());
+    std::iota(indices.begin(), indices.end(), 0);
     std::cout << "Calculating the best starting word from " << all_words.size()
-              << " guesses against " << answers_count << " possible answers..."
+              << " guesses against " << answers.size() << " possible answers..."
               << std::endl;
 
     const auto start_time = std::chrono::high_resolution_clock::now();
-
-    const encoded_word best_word =
-        find_best_guess_encoded(initial_indices, answers, all_words, false, 0,
-                                0, feedback_ptr, lookups);
-
+    const encoded_word best_word = find_best_guess_encoded(
+        indices, answers, all_words, false, 0, 0, feedback_ptr, lookups);
     const auto end_time = std::chrono::high_resolution_clock::now();
     const std::chrono::duration<double> elapsed = end_time - start_time;
 
-    std::cout << "\n--- Calculation Complete ---" << std::endl;
-    std::cout << "Best starting word: " << decode_word(best_word) << std::endl;
-    std::cout << "Calculation time: " << elapsed.count() << " seconds."
-              << std::endl;
+    std::cout << "\nBest starting word: " << decode_word(best_word)
+              << "\nCalculation time: " << elapsed.count() << " seconds.\n";
+    return 0;
+  }
 
-  } else if (mode == "--word") {
-    const encoded_word encoded_answer = encode_word(word_to_solve);
-
-    const bool answer_is_valid =
-        lookups.answer_index.find(encoded_answer) != lookups.answer_index.end();
-
-    if (!answer_is_valid) {
-      std::cerr << "Error: '" << word_to_solve
-                << "' is not in the official answer list." << std::endl;
-      return 1;
-    }
-
-    SolutionTrace trace;
-    run_non_interactive(encoded_answer, answers, all_words, hard_mode, verbose,
-                        !dump_json, &trace, debug_lookup, feedback_ptr, lookups,
-                        lookup_ptr);
-    if (dump_json) {
-      std::cout << "[";
-      for (size_t i = 0; i < trace.steps.size(); ++i) {
-        const auto &step = trace.steps[i];
-        std::cout << "{\"guess\":\"" << decode_word(step.guess)
-                  << "\",\"feedback\":" << step.feedback << "}";
-        if (i + 1 < trace.steps.size())
-          std::cout << ",";
-      }
-      std::cout << "]\n";
-    } else if (!verbose) {
-      for (const auto &step : trace.steps) {
-        std::cout << decode_word(step.guess) << ' ';
-      }
-      std::cout << "\n";
-    }
-  } else {
-    std::cerr << "Invalid arguments." << std::endl;
-    std::cerr << "Usage: " << argv[0] << " --word <target_word> [--hard-mode]"
-              << std::endl;
-    std::cerr << "   or: " << argv[0] << " --find-best-start" << std::endl;
+  const encoded_word encoded_answer = encode_word(word_to_solve);
+  if (!lookups.answer_index.count(encoded_answer)) {
+    std::cerr << "Error: '" << word_to_solve
+              << "' is not in the official answer list.\n";
     return 1;
+  }
+
+  const bool verbose_output = debug_flag;
+  const bool debug_lookup = debug_flag;
+
+  SolutionTrace trace;
+  run_non_interactive(encoded_answer, answers, all_words, hard_mode,
+                      verbose_output, !dump_json, &trace, debug_lookup,
+                      feedback_ptr, lookups, lookup_ptr);
+
+  if (dump_json) {
+    std::cout << "[";
+    for (size_t i = 0; i < trace.steps.size(); ++i) {
+      const auto &step = trace.steps[i];
+      std::cout << "{\"guess\":\"" << decode_word(step.guess)
+                << "\",\"feedback\":" << step.feedback << "}";
+      if (i + 1 < trace.steps.size())
+        std::cout << ",";
+    }
+    std::cout << "]\n";
+  } else if (!verbose_output) {
+    for (const auto &step : trace.steps) {
+      std::cout << decode_word(step.guess) << ' ';
+    }
+    std::cout << "\n";
   }
 
   return 0;
@@ -1072,8 +1103,3 @@ bool generate_lookup_table(const std::string &path,
             << " bytes)\n";
   return true;
 }
-    if (arg == "--debug") {
-      debug_lookup = true;
-      ++i;
-      continue;
-    }

@@ -11,7 +11,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Add the executable and specify its source files
-add_executable(solver_cpp solver.cpp)
+add_executable(solver solver.cpp)
 
 # Optional: Enable optimizations for release builds
 set(CMAKE_BUILD_TYPE Release)

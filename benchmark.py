@@ -22,7 +22,7 @@ def main() -> None:
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parent
-    solver_path = repo_root / "build" / "solver_cpp"
+    solver_path = repo_root / "build" / "solver"
     answers_path = repo_root / "official_answers.txt"
 
     if not solver_path.exists():
@@ -45,7 +45,7 @@ def main() -> None:
     for word in words:
         start = time.perf_counter()
         result = subprocess.run(
-            [str(solver_path), "--word", word],
+            [str(solver_path), "solve", word],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

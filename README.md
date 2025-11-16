@@ -19,15 +19,17 @@ Two plain-text files live at the repository root: `official_answers.txt` and `of
 For additional performance the solver uses two precomputed assets:
 
 - `word_lists.h` and `opening_table.h` are generated once from the text lists and embedded directly into the binary. You generally do not need to touch these files, but keeping the text lists in sync ensures the embedded data stays accurate.
-- `feedback_table.bin` is an optional binary cache containing the results of `calculate_feedback_encoded` for every (guess, answer) pair. Running the solver with `./build/solver_cpp --build-feedback-table` creates the file (≈29 MB). When present, the solver memory-maps this cache at startup and skips recomputing feedback in the hot loops. If the file is absent, the solver falls back to the slower but correct on-the-fly calculations.
-- `lookup_roate.bin` is a sparse lookup table capturing the optimal next guesses for the default start word (`roate`). Generate it via the solver itself: `./build/solver_cpp --generate-lookup --lookup-start roate --lookup-depth 4 --lookup-output lookup_roate.bin`. The solver automatically loads this file (when present) and follows the precomputed tree before falling back to the entropy search. Delete the file if you want to force the solver to recompute guesses dynamically.
+- `feedback_table.bin` is an optional binary cache containing the results of `calculate_feedback_encoded` for every (guess, answer) pair. Refresh it by passing `--feedback-table` to any mode (for example `./build/solver generate --feedback-table`). When present, the solver memory-maps this cache at startup and skips recomputing feedback in the hot loops. If the file is absent, the solver falls back to the slower but correct on-the-fly calculations.
+- `lookup_roate.bin` is a sparse lookup table capturing the optimal next guesses for the default start word (`roate`). Generate it via the solver itself: `./build/solver generate --lookup-start roate --lookup-depth 4 --lookup-output lookup_roate.bin`. The solver automatically loads this file (when present) and follows the precomputed tree before falling back to the entropy search. Delete the file if you want to force the solver to recompute guesses dynamically.
 
 ## Modes of Operation
 
-The solver can be run in two modes:
+The `solver` binary exposes four explicit modes so you always know which workflow is active:
 
-1.  **Solve Mode:** Solves for a specific target word and prints its process.
-2.  **Find Best Start Mode:** Performs a one-off, exhaustive analysis to determine the single best starting word according to the algorithm.
+- `solve <word>`: non-interactively solve a single target. Pass `--debug` for verbose, turn-by-turn output plus lookup/entropy diagnostics, `--hard-mode` to enforce Wordle hard mode, and `--disable-lookup` to fall back to pure entropy search.
+- `start`: exhaustively analyze all guesses to report the best opening word.
+- `generate`: build `lookup_<word>.bin` files (and optionally rebuild `feedback_table.bin`) entirely inside the C++ binary. Flags such as `--lookup-depth`, `--lookup-output`, `--lookup-start`, and `--feedback-table` customize the generated assets.
+- `help`: display a concise usage summary. `--help` is equivalent and may appear anywhere.
 
 ## Building the Solver
 
@@ -52,24 +54,24 @@ cmake ..
 make
 ```
 
-This will create an executable named `solver_cpp` inside the `build` directory.
+This will create an executable named `solver` inside the `build` directory.
 
 ## How to Use
 
 All commands should be run from the project's root directory.
 
-### To Solve for a Specific Word
-
-Use the `--word` flag followed by the 5-letter word you want to solve. Add `--verbose` if you want to see each turn; otherwise only the final summary is printed. Pass `--debug` to log lookup-table usage and fallback entropy searches for diagnostics.
+Examples:
 
 ```bash
-./build/solver_cpp --word cigar
-```
+# Solve today's puzzle with the default heuristics
+./build/solver solve cigar
 
-### To Find the Best Starting Word
+# See the entire solving trace plus lookup vs. entropy fallbacks
+./build/solver solve clung --debug
 
-Use the `--find-best-start` flag. This will run a full analysis, which may take a minute or two depending on your machine.
+# Find the globally optimal start word
+./build/solver start
 
-```bash
-./build/solver_cpp --find-best-start
+# Build a depth-4 lookup tree for ROATE and refresh feedback_table.bin
+./build/solver generate --lookup-start roate --lookup-depth 4 --lookup-output lookup_roate.bin --feedback-table
 ```
