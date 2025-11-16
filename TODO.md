@@ -18,7 +18,7 @@
 - [x] Rebuild, run solver tests/benchmark, ensure functionality unchanged (basic smoke tests).
 - [ ] Implement new lookup generator:
   - [x] Add state bitset type and memoization cache keyed by remaining subsets.
-  - [ ] Introduce tunable lookahead depth and scoring heuristic (max subset, total size, letter-weight tie breaker).
+  - [x] Introduce tunable lookahead depth and scoring heuristic (max subset, total size, letter-weight tie breaker).
   - [ ] Enforce depth ≤ 6 with backtracking when branches overflow.
   - [ ] Emit sparse nodes from the in-memory tree into the existing binary format.
 - [ ] Thread new generator into CLI (`generate` mode) with appropriate flags.

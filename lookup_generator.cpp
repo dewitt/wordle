@@ -71,6 +71,58 @@ struct MemoKeyHash {
   }
 };
 
+struct ChoiceScore {
+  encoded_word guess = 0;
+  size_t worst = 0;
+  size_t total = 0;
+  int64_t weight = 0;
+};
+
+struct ScoreKey {
+  std::vector<uint64_t> bits;
+  uint32_t depth = 0;
+
+  bool operator==(const ScoreKey &other) const noexcept {
+    return depth == other.depth && bits == other.bits;
+  }
+};
+
+struct ScoreKeyHash {
+  size_t operator()(const ScoreKey &key) const noexcept {
+    size_t h = key.depth;
+    for (const uint64_t word : key.bits) {
+      h ^= std::hash<uint64_t>{}(word) + 0x9e3779b97f4a7c15ULL + (h << 6) +
+           (h >> 2);
+    }
+    return h;
+  }
+};
+
+class ScoreMemo {
+public:
+  std::optional<ChoiceScore> find(const CandidateBitset &mask,
+                                  uint32_t depth) const {
+    ScoreKey probe;
+    probe.depth = depth;
+    probe.bits = mask.bits();
+    const auto it = cache_.find(probe);
+    if (it == cache_.end())
+      return std::nullopt;
+    return it->second;
+  }
+
+  void store(const CandidateBitset &mask, uint32_t depth,
+             const ChoiceScore &score) {
+    ScoreKey key;
+    key.depth = depth;
+    key.bits = mask.bits();
+    cache_.emplace(std::move(key), score);
+  }
+
+private:
+  std::unordered_map<ScoreKey, ChoiceScore, ScoreKeyHash> cache_;
+};
+
 class GenerationMemo {
 public:
   std::optional<uint32_t> find(const CandidateBitset &mask,
@@ -96,60 +148,90 @@ private:
   std::unordered_map<MemoKey, uint32_t, MemoKeyHash> cache_;
 };
 
-encoded_word choose_best_guess(const std::vector<size_t> &indices,
-                               const std::vector<encoded_word> &words,
-                               const FeedbackTable *feedback_table,
-                               const LookupTables &lookups,
-                               const std::vector<uint32_t> &weights,
-                               uint32_t lookahead_depth) {
-  (void)lookahead_depth; // Placeholder for deeper scoring.
-  if (indices.empty())
-    return 0;
-  encoded_word best_guess = 0;
-  size_t best_worst = std::numeric_limits<size_t>::max();
-  size_t best_spread = std::numeric_limits<size_t>::max();
-  int64_t best_weight = -1;
+ChoiceScore choose_best_guess(
+    const std::vector<size_t> &indices, const CandidateBitset &mask,
+    uint32_t lookahead_depth, const std::vector<encoded_word> &words,
+    const FeedbackTable *feedback_table, const LookupTables &lookups,
+    const std::vector<uint32_t> &weights, ScoreMemo &score_memo) {
+  (void)lookups;
+  if (indices.empty()) {
+    return {};
+  }
+  if (lookahead_depth == 0 || mask.count() <= 1) {
+    return {mask.count() == 1 ? words[indices.front()] : 0, mask.count(),
+            mask.count(), 0};
+  }
 
-  std::array<size_t, 243> counts{};
+  if (const auto cached = score_memo.find(mask, lookahead_depth)) {
+    return *cached;
+  }
+
+  ChoiceScore best{};
+  bool have_best = false;
+
+  std::array<std::vector<size_t>, 243> partitions;
   for (size_t guess_idx = 0; guess_idx < words.size(); ++guess_idx) {
-    counts.fill(0);
+    for (auto &vec : partitions) {
+      vec.clear();
+    }
+
     if (feedback_table && feedback_table->loaded()) {
       const uint8_t *row = feedback_table->row(guess_idx);
       for (const auto idx : indices) {
-        counts[row[idx]]++;
+        partitions[row[idx]].push_back(idx);
       }
     } else {
-      encoded_word guess = words[guess_idx];
+      const encoded_word guess = words[guess_idx];
       for (const auto idx : indices) {
         const feedback_int fb =
             calculate_feedback_encoded(guess, words[idx]);
-        counts[fb]++;
+        partitions[fb].push_back(idx);
       }
     }
 
     size_t worst = 0;
-    size_t spread = 0;
-    for (const auto cnt : counts) {
-      if (cnt == 0)
+    size_t total = 0;
+    bool any = false;
+    for (uint16_t fb = 0; fb < 243; ++fb) {
+      auto &subset = partitions[fb];
+      if (subset.empty())
         continue;
-      worst = std::max(worst, cnt);
-      spread += cnt * cnt;
+      any = true;
+      size_t branch_worst = subset.size();
+      size_t branch_total = subset.size();
+      if (lookahead_depth > 1 && subset.size() > 1) {
+        CandidateBitset subset_mask =
+            CandidateBitset::FromIndices(subset, words.size());
+        const auto child = choose_best_guess(
+            subset, subset_mask, lookahead_depth - 1, words, feedback_table,
+            lookups, weights, score_memo);
+        branch_worst = child.worst;
+        branch_total = child.total;
+      }
+      worst = std::max(worst, branch_worst);
+      total += branch_total;
     }
+    if (!any)
+      continue;
 
-    const int64_t weight = weights[guess_idx];
-    const auto candidate =
-        std::make_tuple(worst, spread, -static_cast<int64_t>(weight));
-    const auto current =
-        std::make_tuple(best_worst, best_spread, -best_weight);
-    if (!best_guess || candidate < current) {
-      best_guess = words[guess_idx];
-      best_worst = worst;
-      best_spread = spread;
-      best_weight = weight;
+    ChoiceScore candidate{words[guess_idx], worst, total,
+                          static_cast<int64_t>(weights[guess_idx])};
+    const auto candidate_tuple =
+        std::make_tuple(candidate.worst, candidate.total, -candidate.weight);
+    const auto current_tuple =
+        std::make_tuple(best.worst, best.total, -best.weight);
+    if (!have_best || candidate_tuple < current_tuple) {
+      best = candidate;
+      have_best = true;
     }
   }
 
-  return best_guess;
+  if (!have_best) {
+    best = {0, mask.count(), mask.count(), 0};
+  }
+
+  score_memo.store(mask, lookahead_depth, best);
+  return best;
 }
 
 } // namespace
@@ -177,6 +259,7 @@ bool generate_lookup_table(const std::string &path,
 
   const size_t word_count = words.size();
   GenerationMemo memo;
+  ScoreMemo score_memo;
 
   std::function<uint32_t(const std::vector<size_t> &, const CandidateBitset &,
                          encoded_word, uint32_t)>
@@ -197,6 +280,7 @@ bool generate_lookup_table(const std::string &path,
       uint16_t feedback;
       encoded_word next_guess;
       std::vector<size_t> subset;
+      CandidateBitset subset_mask;
     };
     std::vector<EntryData> entries;
     entries.reserve(243);
@@ -216,25 +300,28 @@ bool generate_lookup_table(const std::string &path,
           }
         }
         encoded_word final_guess = words[best_idx];
-        entries.push_back({fb, final_guess, std::move(subset)});
+        entries.push_back({fb, final_guess, std::move(subset), {}});
         continue;
       }
-      encoded_word next = 0;
       if (subset.size() == 1) {
-        entries.push_back({fb, words[subset[0]], {}});
+        entries.push_back({fb, words[subset[0]], {}, {}});
         continue;
       }
       if (remaining_depth == 0) {
-        entries.push_back({fb, 0, {}});
+        entries.push_back({fb, 0, {}, {}});
         continue;
       }
+      CandidateBitset subset_mask =
+          CandidateBitset::FromIndices(subset, word_count);
       const uint32_t lookahead =
           remaining_depth > 1
               ? std::min<uint32_t>(kLookaheadDepth, remaining_depth - 1)
               : 0;
-      next = choose_best_guess(subset, words, feedback_table, lookups, weights,
-                               lookahead);
-      entries.push_back({fb, next, subset});
+      const auto choice =
+          choose_best_guess(subset, subset_mask, lookahead, words,
+                            feedback_table, lookups, weights, score_memo);
+      encoded_word next = choice.guess ? choice.guess : words[subset.front()];
+      entries.push_back({fb, next, subset, std::move(subset_mask)});
     }
 
     const uint32_t node_offset = static_cast<uint32_t>(buffer.size());
@@ -264,7 +351,9 @@ bool generate_lookup_table(const std::string &path,
       if (remaining_depth > 1 && entry.subset.size() > 1 &&
           entry.next_guess != 0) {
         CandidateBitset child_mask =
-            CandidateBitset::FromIndices(entry.subset, word_count);
+            entry.subset_mask.count()
+                ? entry.subset_mask
+                : CandidateBitset::FromIndices(entry.subset, word_count);
         child_offset =
             HEADER_SIZE +
             write_node(entry.subset, child_mask, entry.next_guess,
