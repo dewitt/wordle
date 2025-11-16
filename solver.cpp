@@ -785,6 +785,11 @@ int main(int argc, char *argv[]) {
       i += 2;
       continue;
     }
+    if (arg == "--debug") {
+      debug_lookup = true;
+      ++i;
+      continue;
+    }
     if (arg == "--word") {
       if (!mode.empty()) {
         std::cerr << "--word cannot be combined with other modes.\n";
