@@ -573,7 +573,7 @@ void run_non_interactive(encoded_word answer,
                          const std::vector<encoded_word> &answers,
                          const std::vector<encoded_word> &all_words,
                          bool hard_mode, bool verbose, bool print_output,
-                         SolutionTrace *trace,
+                         SolutionTrace *trace, bool debug_lookup,
                          const FeedbackTable *feedback_table,
                          const LookupTables &lookups,
                          const PrecomputedLookup *precomputed) {
@@ -606,6 +606,11 @@ void run_non_interactive(encoded_word answer,
       const uint8_t *next_node = precomputed->find_child(
           lookup_node, static_cast<uint16_t>(feedback_val), lookup_guess);
       if (lookup_guess != 0) {
+        if (debug_lookup) {
+          std::cerr << "[lookup] depth=" << turn
+                    << " fb=" << feedback_val
+                    << " guess=" << decode_word(lookup_guess) << "\n";
+        }
         guess = lookup_guess;
         lookup_node = next_node;
         lookup_level++;
@@ -621,9 +626,16 @@ void run_non_interactive(encoded_word answer,
       } else if (!hard_mode && turn == 2) {
         const encoded_word precomputed_guess = kSecondGuessTable[feedback_val];
         if (precomputed_guess != 0) {
+          if (debug_lookup) {
+            std::cerr << "[lookup-k2] fb=" << feedback_val
+                      << " guess=" << decode_word(precomputed_guess) << "\n";
+          }
           guess = precomputed_guess;
           lookup_node = nullptr;
         } else {
+          if (debug_lookup) {
+            std::cerr << "[fallback] depth=2 fb=" << feedback_val << "\n";
+          }
           guess = find_best_guess_encoded(possible_indices, answers, all_words,
                                           hard_mode, guess, feedback_val,
                                           feedback_table, lookups);
@@ -632,6 +644,11 @@ void run_non_interactive(encoded_word answer,
       } else if (possible_indices.size() == 1) {
         guess = answers[possible_indices[0]];
       } else {
+        if (debug_lookup) {
+          std::cerr << "[fallback] depth=" << turn
+                    << " fb=" << feedback_val
+                    << " subset=" << possible_indices.size() << "\n";
+        }
         guess = find_best_guess_encoded(possible_indices, answers, all_words,
                                         hard_mode, guess, feedback_val,
                                         feedback_table, lookups);
@@ -714,6 +731,7 @@ int main(int argc, char *argv[]) {
   bool dump_json = false;
   bool disable_lookup = false;
   bool generate_lookup = false;
+  bool debug_lookup = false;
   std::string lookup_output;
   uint32_t lookup_depth = 0;
   encoded_word lookup_start = kInitialGuess;
@@ -897,7 +915,8 @@ int main(int argc, char *argv[]) {
 
     SolutionTrace trace;
     run_non_interactive(encoded_answer, answers, all_words, hard_mode, verbose,
-                        !dump_json, &trace, feedback_ptr, lookups, lookup_ptr);
+                        !dump_json, &trace, debug_lookup, feedback_ptr, lookups,
+                        lookup_ptr);
     if (dump_json) {
       std::cout << "[";
       for (size_t i = 0; i < trace.steps.size(); ++i) {
@@ -1048,3 +1067,8 @@ bool generate_lookup_table(const std::string &path,
             << " bytes)\n";
   return true;
 }
+    if (arg == "--debug") {
+      debug_lookup = true;
+      ++i;
+      continue;
+    }

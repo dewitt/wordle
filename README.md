@@ -60,7 +60,7 @@ All commands should be run from the project's root directory.
 
 ### To Solve for a Specific Word
 
-Use the `--word` flag followed by the 5-letter word you want to solve. Add `--verbose` if you want to see each turn; otherwise only the final summary is printed.
+Use the `--word` flag followed by the 5-letter word you want to solve. Add `--verbose` if you want to see each turn; otherwise only the final summary is printed. Pass `--debug` to log lookup-table usage and fallback entropy searches for diagnostics.
 
 ```bash
 ./build/solver_cpp --word cigar
