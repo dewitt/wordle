@@ -58,6 +58,8 @@
 using encoded_word = uint64_t;
 using feedback_int = int;
 
+inline uint8_t get_char_code_at(encoded_word word, int pos);
+
 struct FeedbackTable {
   size_t guess_count = 0;
   size_t answer_count = 0;
@@ -160,8 +162,7 @@ struct PrecomputedLookup {
   }
 
   const uint8_t *find_child(const uint8_t *node, uint16_t feedback,
-                            encoded_word &guess_out,
-                            bool &depth_limited) const {
+                            encoded_word &guess_out) const {
     if (!node)
       return nullptr;
     uint32_t count = *reinterpret_cast<const uint32_t *>(node);
@@ -169,26 +170,18 @@ struct PrecomputedLookup {
     for (uint32_t i = 0; i < count; ++i) {
       uint16_t fb = *reinterpret_cast<const uint16_t *>(ptr);
       ptr += 2; // skip feedback
-      uint16_t flags = *reinterpret_cast<const uint16_t *>(ptr);
-      ptr += 2;
+      ptr += 2; // skip reserved
       encoded_word guess = *reinterpret_cast<const encoded_word *>(ptr);
       ptr += sizeof(encoded_word);
       uint32_t child = *reinterpret_cast<const uint32_t *>(ptr);
       ptr += 4;
       if (fb == feedback) {
-        if (flags != 0) {
-          depth_limited = true;
-          guess_out = 0;
-          return nullptr;
-        }
-        depth_limited = false;
         guess_out = guess;
         if (child == 0)
           return nullptr;
         return buffer.data() + child;
       }
     }
-    depth_limited = false;
     return nullptr;
   }
 };
@@ -221,6 +214,35 @@ const std::vector<encoded_word> &load_words() {
   static const std::vector<encoded_word> words(std::begin(kEncodedWords),
                                                std::end(kEncodedWords));
   return words;
+}
+
+const std::vector<uint32_t> &load_word_weights() {
+  static const std::vector<uint32_t> weights = [] {
+    const auto &words = load_words();
+    std::array<uint32_t, 27> letter_counts{};
+    for (const auto word : words) {
+      for (int i = 0; i < 5; ++i) {
+        const uint8_t code = get_char_code_at(word, i);
+        letter_counts[code]++;
+      }
+    }
+    std::vector<uint32_t> result(words.size());
+    for (size_t idx = 0; idx < words.size(); ++idx) {
+      encoded_word word = words[idx];
+      std::array<bool, 27> seen{};
+      uint32_t score = 0;
+      for (int i = 0; i < 5; ++i) {
+        const uint8_t code = get_char_code_at(word, i);
+        if (!seen[code]) {
+          score += letter_counts[code];
+          seen[code] = true;
+        }
+      }
+      result[idx] = score;
+    }
+    return result;
+  }();
+  return weights;
 }
 
 constexpr encoded_word kInitialGuess = encode_word("roate");
@@ -434,9 +456,11 @@ find_best_guess_worker(const std::vector<size_t> &possible_indices,
                        const std::vector<encoded_word> &guess_subset,
                        const FeedbackTable *feedback_table,
                        const LookupTables &lookups,
-                       const std::vector<encoded_word> &words) {
+                       const std::vector<encoded_word> &words,
+                       const std::vector<uint32_t> &weights) {
   encoded_word local_best_guess = 0;
   double local_min_score = std::numeric_limits<double>::max();
+  uint32_t local_best_weight = 0;
 
   for (const auto &guess : guess_subset) {
     std::array<int, 243> feedback_groups{};
@@ -472,9 +496,19 @@ find_best_guess_worker(const std::vector<size_t> &possible_indices,
       }
     }
 
-    if (!pruned && current_score < local_min_score) {
-      local_min_score = current_score;
-      local_best_guess = guess;
+    if (!pruned) {
+      uint32_t guess_weight = 0;
+      const auto weight_it = lookups.word_index.find(guess);
+      if (weight_it != lookups.word_index.end()) {
+        guess_weight = weights[weight_it->second];
+      }
+      if (current_score < local_min_score ||
+          (current_score == local_min_score &&
+           guess_weight > local_best_weight)) {
+        local_min_score = current_score;
+        local_best_guess = guess;
+        local_best_weight = guess_weight;
+      }
     }
   }
   return {local_best_guess, local_min_score};
@@ -485,7 +519,8 @@ encoded_word find_best_guess_encoded(
     const std::vector<size_t> &possible_indices,
     const std::vector<encoded_word> &words, bool hard_mode,
     encoded_word previous_guess, feedback_int previous_feedback,
-    const FeedbackTable *feedback_table, const LookupTables &lookups) {
+    const FeedbackTable *feedback_table, const LookupTables &lookups,
+    const std::vector<uint32_t> &weights) {
   if (possible_indices.empty()) {
     return 0;
   }
@@ -518,7 +553,8 @@ encoded_word find_best_guess_encoded(
       futures.push_back(std::async(std::launch::async, find_best_guess_worker,
                                    std::cref(possible_indices),
                                    std::cref(word_chunks[i]), feedback_table,
-                                   std::cref(lookups), std::cref(words)));
+                                   std::cref(lookups), std::cref(words),
+                                   std::cref(weights)));
     }
   }
 
@@ -580,6 +616,7 @@ void run_non_interactive(encoded_word answer,
                          bool debug_lookup, const FeedbackTable *feedback_table,
                          const LookupTables &lookups,
                          const PrecomputedLookup *precomputed) {
+  const auto &word_weights = load_word_weights();
   std::vector<size_t> possible_indices(words.size());
   std::iota(possible_indices.begin(), possible_indices.end(), 0);
   int turn = 1;
@@ -596,21 +633,38 @@ void run_non_interactive(encoded_word answer,
     std::cout << "------------------------------" << std::endl;
   }
 
+  auto pick_weighted_candidate = [&](const std::vector<size_t> &indices) {
+    size_t best_idx = indices.front();
+    uint32_t best_weight = 0;
+    for (const auto idx : indices) {
+      const uint32_t weight = word_weights[idx];
+      if (weight > best_weight) {
+        best_weight = weight;
+        best_idx = idx;
+      }
+    }
+    return words[best_idx];
+  };
+
   while (turn <= 6 && guess != answer) {
     if (verbose && print_output) {
       std::cout << "Turn " << turn << " (" << possible_indices.size()
                 << " possibilities remain)" << std::endl;
     }
 
+    const int remaining_guesses = 6 - turn + 1;
     bool used_lookup = false;
+    if (remaining_guesses == 1 && !possible_indices.empty()) {
+      guess = pick_weighted_candidate(possible_indices);
+      lookup_node = nullptr;
+      used_lookup = true;
+    }
     if (!hard_mode && precomputed && lookup_node && turn > 1 &&
         lookup_level < lookup_max) {
       encoded_word lookup_guess = 0;
-      bool depth_limited = false;
       const uint8_t *next_node = precomputed->find_child(
-          lookup_node, static_cast<uint16_t>(feedback_val), lookup_guess,
-          depth_limited);
-      if (!depth_limited && lookup_guess != 0) {
+          lookup_node, static_cast<uint16_t>(feedback_val), lookup_guess);
+      if (lookup_guess != 0) {
         if (debug_lookup) {
           std::cerr << "[lookup] depth=" << turn << " fb=" << feedback_val
                     << " guess=" << decode_word(lookup_guess) << "\n";
@@ -619,8 +673,6 @@ void run_non_interactive(encoded_word answer,
         lookup_node = next_node;
         lookup_level++;
         used_lookup = true;
-      } else if (depth_limited) {
-        lookup_node = nullptr;
       } else {
         lookup_node = nullptr;
       }
@@ -630,15 +682,15 @@ void run_non_interactive(encoded_word answer,
       if (turn == 1) {
         guess = kInitialGuess;
       } else if (possible_indices.size() == 1) {
-        guess = words[possible_indices[0]];
+        guess = pick_weighted_candidate(possible_indices);
       } else {
         if (debug_lookup) {
           std::cerr << "[fallback] depth=" << turn << " fb=" << feedback_val
                     << " subset=" << possible_indices.size() << "\n";
         }
-        guess =
-            find_best_guess_encoded(possible_indices, words, hard_mode, guess,
-                                    feedback_val, feedback_table, lookups);
+        guess = find_best_guess_encoded(possible_indices, words, hard_mode,
+                                        guess, feedback_val, feedback_table,
+                                        lookups, word_weights);
         lookup_node = nullptr;
       }
     }
@@ -893,8 +945,9 @@ int main(int argc, char *argv[]) {
               << " valid words..." << std::endl;
 
     const auto start_time = std::chrono::high_resolution_clock::now();
-    const encoded_word best_word = find_best_guess_encoded(
-        indices, words, false, 0, 0, feedback_ptr, lookups);
+    const encoded_word best_word =
+        find_best_guess_encoded(indices, words, false, 0, 0, feedback_ptr,
+                                lookups, load_word_weights());
     const auto end_time = std::chrono::high_resolution_clock::now();
     const std::chrono::duration<double> elapsed = end_time - start_time;
 
@@ -946,6 +999,7 @@ bool generate_lookup_table(const std::string &path,
     std::cerr << "Lookup depth must be at least 2.\n";
     return false;
   }
+  const auto &weights = load_word_weights();
 
   constexpr uint32_t HEADER_SIZE = sizeof(LookupHeader);
   auto write_u32 = [](std::vector<uint8_t> &buf, uint32_t val) {
@@ -978,16 +1032,30 @@ bool generate_lookup_table(const std::string &path,
       auto &subset = partitions[fb];
       if (subset.empty())
         continue;
+      if (remaining_depth == 1) {
+        size_t best_idx = subset[0];
+        uint32_t best_weight = 0;
+        for (const auto idx : subset) {
+          const uint32_t weight = weights[idx];
+          if (weight > best_weight) {
+            best_weight = weight;
+            best_idx = idx;
+          }
+        }
+        encoded_word final_guess = words[best_idx];
+        entries.push_back({fb, final_guess, std::move(subset)});
+        continue;
+      }
       encoded_word next = 0;
       if (subset.size() == 1) {
         next = words[subset[0]];
       } else if (feedback_table && feedback_table->loaded()) {
         next = find_best_guess_encoded(subset, words, false, guess, fb,
-                                       feedback_table, lookups);
+                                       feedback_table, lookups, weights);
       }
       if (next == 0) {
         next = find_best_guess_encoded(subset, words, false, guess, fb, nullptr,
-                                       lookups);
+                                       lookups, weights);
       }
       entries.push_back({fb, next, std::move(subset)});
     }
@@ -999,13 +1067,12 @@ bool generate_lookup_table(const std::string &path,
 
     for (const auto &entry : entries) {
       const uint16_t fb = entry.feedback;
-      const uint16_t flags =
-          (remaining_depth <= 1 && entry.subset.size() > 1) ? 1 : 0;
+      const uint16_t reserved = 0;
       buffer.insert(buffer.end(), reinterpret_cast<const uint8_t *>(&fb),
                     reinterpret_cast<const uint8_t *>(&fb) + sizeof(fb));
-      buffer.insert(buffer.end(), reinterpret_cast<const uint8_t *>(&flags),
-                    reinterpret_cast<const uint8_t *>(&flags) +
-                        sizeof(flags));
+      buffer.insert(buffer.end(), reinterpret_cast<const uint8_t *>(&reserved),
+                    reinterpret_cast<const uint8_t *>(&reserved) +
+                        sizeof(reserved));
       buffer.insert(buffer.end(),
                     reinterpret_cast<const uint8_t *>(&entry.next_guess),
                     reinterpret_cast<const uint8_t *>(&entry.next_guess) +

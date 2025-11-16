@@ -10,6 +10,7 @@ This project serves as a case study in C++ performance optimization, demonstrati
 -   **Entropy-Reduction Algorithm:** Suggests the optimal guess to narrow down the list of possible words as quickly as possible.
 -   **Multithreaded:** The search for the best guess is parallelized across all available CPU cores, dramatically reducing calculation time.
 -   **Optimized Data Structures:** 5-letter words are encoded into 64-bit integers, allowing for extremely fast, cache-friendly comparisons using bitwise operations.
+-   **Weighted Tie-Breaks:** When multiple candidates score the same entropy, the solver prefers words whose letters are most common across the dictionary, leading to more human-like decisions on tricky branches.
 -   **Official Word Lists:** Uses the official, community-verified Wordle answer and guess lists for accuracy.
 
 ## Data Files
