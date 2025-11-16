@@ -4,8 +4,8 @@
 
 1. **Word encoding** – `words.txt` is embedded in `word_lists.h` as `kEncodedWords`. Each five-letter word is encoded in 25 bits (5 bits/letter) so comparisons and table lookups can operate entirely on integers.
 2. **Lookup tables** – At startup the solver builds an `unordered_map` (`LookupTables::word_index`) from encoded word → row/column index. This single map feeds the feedback cache, lookup tables, and CLI validation.
-3. **Feedback computation** – `calculate_feedback_encoded` matches the official Wordle rules by running two passes (greens, then yellows) over the encoded letters. Hot paths fetch precomputed values from `feedback_table.bin`; cold paths fall back to this routine.
-4. **Search** – `find_best_guess_encoded` partitions the remaining possibilities for each candidate guess, scoring them by entropy (sum of squares). The work is distributed across all CPU cores with `std::async`. Every word also carries a letter-frequency weight (sum of unique letter counts across `words.txt`); this weight breaks ties between equal-entropy guesses so common-letter words are preferred. When the solver is down to its final guess, it simply selects the remaining candidate with the highest weight rather than probing off-list words. These same rules are baked into lookup table generation so cached branches exactly match the live heuristic.
+3. **Feedback computation** – `calculate_feedback_encoded` matches the official Wordle rules by running two passes (greens, then yellows) over the encoded letters. This is the only “dynamic” work the runtime does once the lookup table has been generated.
+4. **Lookup tree generation** – `generate_lookup_table` walks every reachable feedback branch (rooted at the fixed opener `roate`) up to a user-specified depth (default: 6 turns). For each intermediate subset it invokes the entropy search once to record the optimal next guess. Leaves are either (a) singleton subsets (“the word is known, stop recursing”) or (b) depth-exhausted branches (which store a sentinel so the runtime reports failure). Runtime never falls back to entropy: it simply streams guesses from this tree and aborts if a branch is missing.
 5. **Lookup acceleration** – Optional `lookup_<start>.bin` files store a sparse prefix tree of optimal guesses for the default starting word. During a solve the binary walks this tree before falling back to the entropy search.
 
 ## Command-line interface
@@ -63,15 +63,15 @@ Entries are sorted by `feedback`. Offsets point to other nodes within the same f
 - For each node/state (defined by a feedback history), the generator filters the candidate indices to what remains viable:
   * If the subset is empty, no entry is emitted for that feedback.
   * If subset size is 1, the guess stored is that remaining word.
-  * Otherwise, it runs `find_best_guess_encoded` to choose the optimal next guess (reusing `feedback_table.bin` when available).
-- This process repeats recursively until the requested depth is reached; the last stored guess corresponds to the depth-th turn (start word counts as turn 1).
+- Otherwise, it runs `find_best_guess_encoded` to choose the optimal next guess (reusing `feedback_table.bin` when available). If the depth limit is reached while more than one candidate remains, the entry records a zero guess so the runtime can report failure for that feedback branch.
+- This process repeats recursively until the requested depth is reached; the last stored guess corresponds to the depth-th turn (start word counts as turn 1). In practice we always generate with `--lookup-depth 6` so every Wordle turn is covered.
 - Because every possible feedback code (0..242) is iterated, the resulting tree covers all branches for the selected depth. Runtime lookup never needs to revert to entropy search until it exhausts the precomputed depth.
 
 ## Regeneration
 ```
 ./build/solver generate --lookup-start roate --lookup-depth 6 --lookup-output lookup_roate.bin
 ```
-The solver filters candidates and runs the search internally for each branch, ensuring the lookup mirrors the exact runtime behavior. Adjust `--lookup-start`, `--lookup-depth`, and `--lookup-output` as needed.
+The solver filters candidates and runs the search internally for each branch, ensuring the lookup mirrors the exact runtime behavior. Adjust `--lookup-start`, `--lookup-depth`, and `--lookup-output` as needed (though the shipping binary assumes depth 6 and `roate`).
 
 # Feedback Cache Format (`feedback_table.bin`)
 

@@ -586,8 +586,7 @@ struct SolutionTrace {
 void print_usage(const char *prog_name) {
   std::cout
       << "Usage:\n"
-      << "  " << prog_name
-      << " solve <word> [--hard-mode] [--debug] [--disable-lookup]\n"
+      << "  " << prog_name << " solve <word> [--debug]\n"
       << "  " << prog_name << " start [--debug]\n"
       << "  " << prog_name
       << " generate [--lookup-depth N] [--lookup-output FILE]\n"
@@ -596,9 +595,6 @@ void print_usage(const char *prog_name) {
       << "Flags:\n"
       << "  --debug           Verbose turn-by-turn output plus lookup/fallback "
          "diagnostics.\n"
-      << "  --hard-mode       Enforce Wordle hard-mode constraints when "
-         "solving.\n"
-      << "  --disable-lookup  Ignore precomputed lookup tables (solve mode).\n"
       << "  --dump-json       Emit a JSON trace for solve mode instead of "
          "text.\n"
       << "  --lookup-depth N  Depth for lookup generation (default: 6).\n"
@@ -613,19 +609,19 @@ void print_usage(const char *prog_name) {
 void run_non_interactive(encoded_word answer,
                          const std::vector<encoded_word> &words, bool hard_mode,
                          bool verbose, bool print_output, SolutionTrace *trace,
-                         bool debug_lookup, const FeedbackTable *feedback_table,
-                         const LookupTables &lookups,
-                         const PrecomputedLookup *precomputed) {
-  const auto &word_weights = load_word_weights();
-  std::vector<size_t> possible_indices(words.size());
-  std::iota(possible_indices.begin(), possible_indices.end(), 0);
+                         bool debug_lookup, const FeedbackTable *,
+                         const LookupTables &, const PrecomputedLookup *tree) {
+  (void)words;
+  (void)hard_mode;
+  (void)debug_lookup;
+  if (!tree || !tree->root) {
+    std::cerr << "Error: precomputed lookup table is required for solving.\n";
+    return;
+  }
+
   int turn = 1;
-  encoded_word guess = 0;
-  feedback_int feedback_val = 0;
-  const uint8_t *lookup_node = precomputed ? precomputed->root : nullptr;
-  const uint32_t lookup_max =
-      (precomputed && precomputed->depth > 0) ? (precomputed->depth - 1) : 0;
-  uint32_t lookup_level = 0;
+  encoded_word guess = kInitialGuess;
+  const uint8_t *node = tree->root;
 
   if (verbose && print_output) {
     std::cout << "Solving for: " << decode_word(answer)
@@ -633,114 +629,64 @@ void run_non_interactive(encoded_word answer,
     std::cout << "------------------------------" << std::endl;
   }
 
-  auto pick_weighted_candidate = [&](const std::vector<size_t> &indices) {
-    size_t best_idx = indices.front();
-    uint32_t best_weight = 0;
-    for (const auto idx : indices) {
-      const uint32_t weight = word_weights[idx];
-      if (weight > best_weight) {
-        best_weight = weight;
-        best_idx = idx;
-      }
-    }
-    return words[best_idx];
-  };
-
-  while (turn <= 6 && guess != answer) {
+  while (turn <= 6) {
     if (verbose && print_output) {
-      std::cout << "Turn " << turn << " (" << possible_indices.size()
-                << " possibilities remain)" << std::endl;
+      std::cout << "Turn " << turn << std::endl;
     }
 
-    const int remaining_guesses = 6 - turn + 1;
-    bool used_lookup = false;
-    if (remaining_guesses == 1 && !possible_indices.empty()) {
-      guess = pick_weighted_candidate(possible_indices);
-      lookup_node = nullptr;
-      used_lookup = true;
-    }
-    if (!hard_mode && precomputed && lookup_node && turn > 1 &&
-        lookup_level < lookup_max) {
-      encoded_word lookup_guess = 0;
-      const uint8_t *next_node = precomputed->find_child(
-          lookup_node, static_cast<uint16_t>(feedback_val), lookup_guess);
-      if (lookup_guess != 0) {
-        if (debug_lookup) {
-          std::cerr << "[lookup] depth=" << turn << " fb=" << feedback_val
-                    << " guess=" << decode_word(lookup_guess) << "\n";
-        }
-        guess = lookup_guess;
-        lookup_node = next_node;
-        lookup_level++;
-        used_lookup = true;
-      } else {
-        lookup_node = nullptr;
-      }
-    }
-
-    if (!used_lookup) {
-      if (turn == 1) {
-        guess = kInitialGuess;
-      } else if (possible_indices.size() == 1) {
-        guess = pick_weighted_candidate(possible_indices);
-      } else {
-        if (debug_lookup) {
-          std::cerr << "[fallback] depth=" << turn << " fb=" << feedback_val
-                    << " subset=" << possible_indices.size() << "\n";
-        }
-        guess = find_best_guess_encoded(possible_indices, words, hard_mode,
-                                        guess, feedback_val, feedback_table,
-                                        lookups, word_weights);
-        lookup_node = nullptr;
-      }
-    }
-
-    if (guess == 0) {
-      std::cout << "Solver failed to find a valid guess." << std::endl;
-      break;
-    }
-
-    feedback_val = calculate_feedback_encoded(guess, answer);
-
-    std::string feedback_str;
-    feedback_str.reserve(5);
-    int temp_feedback = feedback_val;
-    for (int i = 0; i < 5; ++i) {
-      const int remainder = temp_feedback % 3;
+    feedback_int feedback_val = calculate_feedback_encoded(guess, answer);
+    std::string feedback_str(5, '_');
+    int temp = feedback_val;
+    for (int i = 4; i >= 0; --i) {
+      const int remainder = temp % 3;
       if (remainder == 2)
-        feedback_str += 'g';
+        feedback_str[i] = 'g';
       else if (remainder == 1)
-        feedback_str += 'y';
-      else
-        feedback_str += '_';
-      temp_feedback /= 3;
+        feedback_str[i] = 'y';
+      temp /= 3;
     }
-    std::reverse(feedback_str.begin(), feedback_str.end());
 
     if (verbose && print_output) {
       std::cout << "Guess: " << decode_word(guess)
                 << ", Feedback: " << feedback_str << std::endl;
     }
-
     if (trace) {
       trace->steps.push_back({guess, feedback_val});
     }
 
-    if (feedback_str == "ggggg") {
+    if (feedback_val == 242) {
       if (print_output) {
         std::cout << "\nSolved in " << turn << " guesses!" << std::endl;
       }
       return;
     }
 
-    possible_indices = filter_candidate_indices(
-        possible_indices, guess, feedback_val, feedback_table, lookups, words);
-    turn++;
-  }
+    if (turn == 6) {
+      std::cout << "Solver failed to find the word. Last guess was '"
+                << decode_word(guess) << "'.\n";
+      return;
+    }
 
-  if (guess != answer && print_output) {
-    std::cout << "\nSolver failed to find the word. Last guess was '"
-              << decode_word(guess) << "'." << std::endl;
+    if (!node) {
+      std::cout << "Solver failed: lookup table missing entries.\n";
+      return;
+    }
+
+    encoded_word next_guess = 0;
+    const uint8_t *next_node =
+        tree->find_child(node, static_cast<uint16_t>(feedback_val), next_guess);
+    if (next_guess == 0) {
+      std::cout << "Solver failed: lookup tree has no entry for feedback '"
+                << feedback_str << "' on turn " << turn << ".\n";
+      return;
+    }
+    if (debug_lookup) {
+      std::cerr << "[lookup] depth=" << (turn + 1)
+                << " guess=" << decode_word(next_guess) << "\n";
+    }
+    guess = next_guess;
+    node = next_node;
+    ++turn;
   }
 }
 
@@ -862,6 +808,11 @@ int main(int argc, char *argv[]) {
     std::cerr << "--dump-json is only valid in solve mode.\n";
     return 1;
   }
+  if (disable_lookup) {
+    std::cerr << "--disable-lookup is not supported when using the precomputed "
+                 "solver.\n";
+    return 1;
+  }
 
   std::string word_to_solve;
   if (solve_mode) {
@@ -937,6 +888,12 @@ int main(int argc, char *argv[]) {
       lookup_table.load("lookup_roate.bin", kInitialGuess)) {
     lookup_ptr = &lookup_table;
   }
+  if (solve_mode && !lookup_ptr) {
+    std::cerr << "Lookup file 'lookup_roate.bin' not found. Run `"
+              << "./build/solver generate --lookup-start roate --lookup-depth "
+                 "6 --lookup-output lookup_roate.bin` first.\n";
+    return 1;
+  }
 
   if (start_mode) {
     std::vector<size_t> indices(words.size());
@@ -995,8 +952,8 @@ bool generate_lookup_table(const std::string &path,
                            encoded_word start, uint32_t depth,
                            const FeedbackTable *feedback_table,
                            const LookupTables &lookups) {
-  if (depth < 2) {
-    std::cerr << "Lookup depth must be at least 2.\n";
+  if (depth < 1) {
+    std::cerr << "Lookup depth must be at least 1.\n";
     return false;
   }
   const auto &weights = load_word_weights();
@@ -1048,8 +1005,14 @@ bool generate_lookup_table(const std::string &path,
       }
       encoded_word next = 0;
       if (subset.size() == 1) {
-        next = words[subset[0]];
-      } else if (feedback_table && feedback_table->loaded()) {
+        entries.push_back({fb, words[subset[0]], {}});
+        continue;
+      }
+      if (remaining_depth == 0) {
+        entries.push_back({fb, 0, {}});
+        continue;
+      }
+      if (feedback_table && feedback_table->loaded()) {
         next = find_best_guess_encoded(subset, words, false, guess, fb,
                                        feedback_table, lookups, weights);
       }
@@ -1057,7 +1020,7 @@ bool generate_lookup_table(const std::string &path,
         next = find_best_guess_encoded(subset, words, false, guess, fb, nullptr,
                                        lookups, weights);
       }
-      entries.push_back({fb, next, std::move(subset)});
+      entries.push_back({fb, next, subset});
     }
 
     const uint32_t node_offset = static_cast<uint32_t>(buffer.size());
@@ -1084,7 +1047,8 @@ bool generate_lookup_table(const std::string &path,
     for (size_t idx = 0; idx < entries.size(); ++idx) {
       const auto &entry = entries[idx];
       uint32_t child_offset = 0;
-      if (remaining_depth > 1 && entry.subset.size() > 1) {
+      if (remaining_depth > 1 && entry.subset.size() > 1 &&
+          entry.next_guess != 0) {
         child_offset = HEADER_SIZE + write_node(entry.subset, entry.next_guess,
                                                 remaining_depth - 1);
       }
@@ -1095,9 +1059,14 @@ bool generate_lookup_table(const std::string &path,
     return node_offset;
   };
 
+  if (depth < 1) {
+    std::cerr << "Depth must be at least 1.\n";
+    return false;
+  }
   std::vector<size_t> root_indices(words.size());
   std::iota(root_indices.begin(), root_indices.end(), 0);
-  uint32_t root_offset = write_node(root_indices, start, depth);
+  uint32_t root_offset =
+      write_node(root_indices, start, depth > 0 ? depth - 1 : 0);
 
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
   if (!out) {
