@@ -8,3 +8,11 @@
 - [x] Regenerate lookup table via new CLI, re-run benchmarks/tests.
 - [x] Document `feedback_table.bin` format in DESIGN.md.
 - [ ] Ensure formatting & tidy repo; commit.
+- [x] Retire PLAN.md workflow (use TODO.md as the single source of task tracking).
+- [x] Restructure codebase: keep CLI entry minimal in `solver_main.cpp`.
+- [x] Extract runtime traversal (loading lookup, solving) into `solver_runtime.{h,cpp}`.
+- [x] Extract lookup generator (state bitsets, memoization, serialization) into `lookup_generator.{h,cpp}`.
+- [x] Extract shared word/feedback utilities into dedicated modules (e.g., `words_data`, `feedback_cache`).
+- [x] Update CMakeLists.txt for new source files.
+- [x] Adjust docs (README/DESIGN) to reflect new source layout.
+- [x] Rebuild, run solver tests/benchmark, ensure functionality unchanged (basic smoke tests).
