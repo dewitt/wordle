@@ -94,4 +94,7 @@ Examples:
 
 # Experiment with a tiny word list (useful for generator debugging)
 ./build/solver generate --word-list test_words.txt --lookup-start roate --lookup-output lookup_test.bin
+
+# Profile generator performance across subset sizes
+python3 tools/profile_generator.py --sizes 50 100 250 --timeout 120
 ```
