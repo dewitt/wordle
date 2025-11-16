@@ -160,7 +160,8 @@ struct PrecomputedLookup {
   }
 
   const uint8_t *find_child(const uint8_t *node, uint16_t feedback,
-                            encoded_word &guess_out) const {
+                            encoded_word &guess_out,
+                            bool &depth_limited) const {
     if (!node)
       return nullptr;
     uint32_t count = *reinterpret_cast<const uint32_t *>(node);
@@ -168,18 +169,26 @@ struct PrecomputedLookup {
     for (uint32_t i = 0; i < count; ++i) {
       uint16_t fb = *reinterpret_cast<const uint16_t *>(ptr);
       ptr += 2; // skip feedback
-      ptr += 2; // skip reserved
+      uint16_t flags = *reinterpret_cast<const uint16_t *>(ptr);
+      ptr += 2;
       encoded_word guess = *reinterpret_cast<const encoded_word *>(ptr);
       ptr += sizeof(encoded_word);
       uint32_t child = *reinterpret_cast<const uint32_t *>(ptr);
       ptr += 4;
       if (fb == feedback) {
+        if (flags != 0) {
+          depth_limited = true;
+          guess_out = 0;
+          return nullptr;
+        }
+        depth_limited = false;
         guess_out = guess;
         if (child == 0)
           return nullptr;
         return buffer.data() + child;
       }
     }
+    depth_limited = false;
     return nullptr;
   }
 };
@@ -494,16 +503,6 @@ encoded_word find_best_guess_encoded(
     guesses_to_check = &valid_hard_mode_guesses;
   }
 
-  constexpr size_t kAnswerOnlyThreshold = 1024;
-  std::vector<encoded_word> limited_guesses;
-  if (possible_indices.size() <= kAnswerOnlyThreshold) {
-    limited_guesses.reserve(possible_indices.size());
-    for (const auto idx : possible_indices) {
-      limited_guesses.push_back(words[idx]);
-    }
-    guesses_to_check = &limited_guesses;
-  }
-
   unsigned int num_threads = std::thread::hardware_concurrency();
   if (num_threads == 0)
     num_threads = 4;
@@ -607,9 +606,11 @@ void run_non_interactive(encoded_word answer,
     if (!hard_mode && precomputed && lookup_node && turn > 1 &&
         lookup_level < lookup_max) {
       encoded_word lookup_guess = 0;
+      bool depth_limited = false;
       const uint8_t *next_node = precomputed->find_child(
-          lookup_node, static_cast<uint16_t>(feedback_val), lookup_guess);
-      if (lookup_guess != 0) {
+          lookup_node, static_cast<uint16_t>(feedback_val), lookup_guess,
+          depth_limited);
+      if (!depth_limited && lookup_guess != 0) {
         if (debug_lookup) {
           std::cerr << "[lookup] depth=" << turn << " fb=" << feedback_val
                     << " guess=" << decode_word(lookup_guess) << "\n";
@@ -618,6 +619,8 @@ void run_non_interactive(encoded_word answer,
         lookup_node = next_node;
         lookup_level++;
         used_lookup = true;
+      } else if (depth_limited) {
+        lookup_node = nullptr;
       } else {
         lookup_node = nullptr;
       }
@@ -996,12 +999,13 @@ bool generate_lookup_table(const std::string &path,
 
     for (const auto &entry : entries) {
       const uint16_t fb = entry.feedback;
-      const uint16_t reserved = 0;
+      const uint16_t flags =
+          (remaining_depth <= 1 && entry.subset.size() > 1) ? 1 : 0;
       buffer.insert(buffer.end(), reinterpret_cast<const uint8_t *>(&fb),
                     reinterpret_cast<const uint8_t *>(&fb) + sizeof(fb));
-      buffer.insert(buffer.end(), reinterpret_cast<const uint8_t *>(&reserved),
-                    reinterpret_cast<const uint8_t *>(&reserved) +
-                        sizeof(reserved));
+      buffer.insert(buffer.end(), reinterpret_cast<const uint8_t *>(&flags),
+                    reinterpret_cast<const uint8_t *>(&flags) +
+                        sizeof(flags));
       buffer.insert(buffer.end(),
                     reinterpret_cast<const uint8_t *>(&entry.next_guess),
                     reinterpret_cast<const uint8_t *>(&entry.next_guess) +
