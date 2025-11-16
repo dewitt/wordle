@@ -32,10 +32,11 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
+#include <functional>
 #include <future>
 #include <iostream>
-#include <cstring>
 #include <iterator>
 #include <limits>
 #include <numeric>
@@ -568,12 +569,14 @@ struct SolutionTrace {
   std::vector<SolutionStep> steps;
 };
 
-void run_non_interactive(
-    encoded_word answer, const std::vector<encoded_word> &answers,
-    const std::vector<encoded_word> &all_words, bool hard_mode, bool verbose,
-    bool print_output, SolutionTrace *trace,
-    const FeedbackTable *feedback_table, const LookupTables &lookups,
-    const PrecomputedLookup *precomputed) {
+void run_non_interactive(encoded_word answer,
+                         const std::vector<encoded_word> &answers,
+                         const std::vector<encoded_word> &all_words,
+                         bool hard_mode, bool verbose, bool print_output,
+                         SolutionTrace *trace,
+                         const FeedbackTable *feedback_table,
+                         const LookupTables &lookups,
+                         const PrecomputedLookup *precomputed) {
   std::vector<size_t> possible_indices(answers.size());
   std::iota(possible_indices.begin(), possible_indices.end(), 0);
   int turn = 1;
@@ -600,10 +603,8 @@ void run_non_interactive(
     if (!hard_mode && precomputed && lookup_node && turn > 1 &&
         lookup_level < lookup_max) {
       encoded_word lookup_guess = 0;
-      const uint8_t *next_node =
-          precomputed->find_child(lookup_node,
-                                  static_cast<uint16_t>(feedback_val),
-                                  lookup_guess);
+      const uint8_t *next_node = precomputed->find_child(
+          lookup_node, static_cast<uint16_t>(feedback_val), lookup_guess);
       if (lookup_guess != 0) {
         guess = lookup_guess;
         lookup_node = next_node;
@@ -688,6 +689,13 @@ void run_non_interactive(
   }
 }
 
+bool generate_lookup_table(const std::string &path,
+                           const std::vector<encoded_word> &answers,
+                           const std::vector<encoded_word> &all_words,
+                           encoded_word start, uint32_t depth,
+                           const FeedbackTable *feedback_table,
+                           const LookupTables &lookups);
+
 int main(int argc, char *argv[]) {
   // Fast I/O
   std::ios_base::sync_with_stdio(false);
@@ -705,6 +713,10 @@ int main(int argc, char *argv[]) {
   bool hard_mode = false;
   bool dump_json = false;
   bool disable_lookup = false;
+  bool generate_lookup = false;
+  std::string lookup_output;
+  uint32_t lookup_depth = 0;
+  encoded_word lookup_start = kInitialGuess;
   std::string mode;
   std::string word_to_solve;
 
@@ -728,6 +740,31 @@ int main(int argc, char *argv[]) {
     if (arg == "--disable-lookup") {
       disable_lookup = true;
       ++i;
+      continue;
+    }
+    if (arg == "--generate-lookup") {
+      generate_lookup = true;
+      ++i;
+      continue;
+    }
+    if (arg == "--lookup-depth") {
+      lookup_depth = static_cast<uint32_t>(std::stoul(argv[i + 1]));
+      i += 2;
+      continue;
+    }
+    if (arg == "--lookup-output") {
+      lookup_output = argv[i + 1];
+      i += 2;
+      continue;
+    }
+    if (arg == "--lookup-start") {
+      std::string start_arg = argv[i + 1];
+      if (start_arg.size() != 5) {
+        std::cerr << "--lookup-start requires a 5-letter word.\n";
+        return 1;
+      }
+      lookup_start = encode_word(start_arg);
+      i += 2;
       continue;
     }
     if (arg == "--word") {
@@ -757,12 +794,17 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  if (mode.empty()) {
+  if (!generate_lookup && mode.empty()) {
     std::cerr << "No mode specified.\n";
     return 1;
   }
 
-  if (mode == "--word" && word_to_solve.empty()) {
+  if (generate_lookup) {
+    lookup_output = lookup_output.empty() ? "lookup_roate.bin" : lookup_output;
+    lookup_depth = lookup_depth ? lookup_depth : 4;
+  }
+
+  if (!generate_lookup && mode == "--word" && word_to_solve.empty()) {
     std::cerr << "Error: --word requires a target word.\n";
     return 1;
   }
@@ -793,6 +835,22 @@ int main(int argc, char *argv[]) {
       load_feedback_table(kFeedbackTablePath, all_words.size(), answers_count);
   if (feedback_table.loaded()) {
     feedback_ptr = &feedback_table;
+  }
+
+  if (generate_lookup) {
+    if (!lookups.guess_index.count(lookup_start)) {
+      std::cerr << "Lookup start word is not in the guess list.\n";
+      return 1;
+    }
+    if (lookup_output.empty()) {
+      lookup_output = "lookup_roate.bin";
+    }
+    if (!generate_lookup_table(lookup_output, answers, all_words, lookup_start,
+                               lookup_depth ? lookup_depth : 4, feedback_ptr,
+                               lookups)) {
+      return 1;
+    }
+    return 0;
   }
   PrecomputedLookup lookup_table;
   const PrecomputedLookup *lookup_ptr = nullptr;
@@ -839,8 +897,7 @@ int main(int argc, char *argv[]) {
 
     SolutionTrace trace;
     run_non_interactive(encoded_answer, answers, all_words, hard_mode, verbose,
-                        !dump_json, &trace, feedback_ptr, lookups,
-                        lookup_ptr);
+                        !dump_json, &trace, feedback_ptr, lookups, lookup_ptr);
     if (dump_json) {
       std::cout << "[";
       for (size_t i = 0; i < trace.steps.size(); ++i) {
@@ -866,4 +923,128 @@ int main(int argc, char *argv[]) {
   }
 
   return 0;
+}
+struct LookupHeader {
+  char magic[4];
+  uint32_t version;
+  uint32_t depth;
+  encoded_word start_encoded;
+  char start_word[5];
+  char reserved[3];
+  uint32_t root_offset;
+};
+
+bool generate_lookup_table(const std::string &path,
+                           const std::vector<encoded_word> &answers,
+                           const std::vector<encoded_word> &all_words,
+                           encoded_word start, uint32_t depth,
+                           const FeedbackTable *feedback_table,
+                           const LookupTables &lookups) {
+  if (depth < 2) {
+    std::cerr << "Lookup depth must be at least 2.\n";
+    return false;
+  }
+
+  constexpr uint32_t HEADER_SIZE = sizeof(LookupHeader);
+  auto write_u32 = [](std::vector<uint8_t> &buf, uint32_t val) {
+    const size_t pos = buf.size();
+    buf.resize(pos + sizeof(uint32_t));
+    std::memcpy(buf.data() + pos, &val, sizeof(uint32_t));
+  };
+
+  std::vector<uint8_t> buffer;
+  buffer.reserve(1 << 20);
+
+  std::function<uint32_t(const std::vector<size_t> &, encoded_word, uint32_t)>
+      write_node = [&](const std::vector<size_t> &indices, encoded_word guess,
+                       uint32_t remaining_depth) -> uint32_t {
+    std::array<std::vector<size_t>, 243> partitions;
+    for (const auto idx : indices) {
+      const feedback_int fb = calculate_feedback_encoded(guess, answers[idx]);
+      partitions[fb].push_back(idx);
+    }
+
+    struct EntryData {
+      uint16_t feedback;
+      encoded_word next_guess;
+      std::vector<size_t> subset;
+    };
+    std::vector<EntryData> entries;
+    entries.reserve(243);
+
+    for (uint16_t fb = 0; fb < 243; ++fb) {
+      auto &subset = partitions[fb];
+      if (subset.empty())
+        continue;
+      encoded_word next = 0;
+      if (subset.size() == 1) {
+        next = answers[subset[0]];
+      } else if (feedback_table && feedback_table->loaded()) {
+        next = find_best_guess_encoded(subset, answers, all_words, false, guess,
+                                       fb, feedback_table, lookups);
+      }
+      if (next == 0) {
+        next = find_best_guess_encoded(subset, answers, all_words, false, guess,
+                                       fb, nullptr, lookups);
+      }
+      entries.push_back({fb, next, std::move(subset)});
+    }
+
+    const uint32_t node_offset = static_cast<uint32_t>(buffer.size());
+    write_u32(buffer, static_cast<uint32_t>(entries.size()));
+    std::vector<size_t> child_positions;
+    child_positions.reserve(entries.size());
+
+    for (const auto &entry : entries) {
+      const uint16_t fb = entry.feedback;
+      const uint16_t reserved = 0;
+      buffer.insert(buffer.end(), reinterpret_cast<const uint8_t *>(&fb),
+                    reinterpret_cast<const uint8_t *>(&fb) + sizeof(fb));
+      buffer.insert(buffer.end(), reinterpret_cast<const uint8_t *>(&reserved),
+                    reinterpret_cast<const uint8_t *>(&reserved) +
+                        sizeof(reserved));
+      buffer.insert(buffer.end(),
+                    reinterpret_cast<const uint8_t *>(&entry.next_guess),
+                    reinterpret_cast<const uint8_t *>(&entry.next_guess) +
+                        sizeof(entry.next_guess));
+      child_positions.push_back(buffer.size());
+      write_u32(buffer, 0);
+    }
+
+    for (size_t idx = 0; idx < entries.size(); ++idx) {
+      const auto &entry = entries[idx];
+      uint32_t child_offset = 0;
+      if (remaining_depth > 1 && entry.subset.size() > 1) {
+        child_offset = HEADER_SIZE + write_node(entry.subset, entry.next_guess,
+                                                remaining_depth - 1);
+      }
+      std::memcpy(buffer.data() + child_positions[idx], &child_offset,
+                  sizeof(child_offset));
+    }
+
+    return node_offset;
+  };
+
+  std::vector<size_t> root_indices(answers.size());
+  std::iota(root_indices.begin(), root_indices.end(), 0);
+  uint32_t root_offset = write_node(root_indices, start, depth);
+
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  if (!out) {
+    std::cerr << "Failed to open '" << path << "' for writing.\n";
+    return false;
+  }
+
+  LookupHeader header{{'P', 'L', 'U', 'T'}, 1, depth, start};
+  std::string start_word = decode_word(start);
+  std::memcpy(header.start_word, start_word.c_str(),
+              std::min<size_t>(5, start_word.size()));
+  header.root_offset = HEADER_SIZE + root_offset;
+
+  out.write(reinterpret_cast<const char *>(&header), sizeof(header));
+  out.write(reinterpret_cast<const char *>(buffer.data()),
+            static_cast<std::streamsize>(buffer.size()));
+  std::cout << "Wrote lookup table '" << path << "' (" << buffer.size()
+            << " bytes)\n";
+  return true;
 }

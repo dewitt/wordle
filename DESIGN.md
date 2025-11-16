@@ -27,8 +27,18 @@ struct Entry {
 ```
 Entries are sorted by `feedback`. Offsets point to other nodes within the same file. Leaves set `child_offset` to 0. The root node immediately follows the 32-byte header.
 
+## Generator semantics
+
+- Generation lives in the solver (`--generate-lookup --start roate --depth N --output lookup_roate.bin`).
+- For each node/state (defined by a feedback history), the generator filters the answer indices to what remains viable:
+  * If the subset is empty, no entry is emitted for that feedback.
+  * If subset size is 1, the guess stored is that remaining answer.
+  * Otherwise, it runs `find_best_guess_encoded` to choose the optimal next guess.
+- This process repeats recursively until the requested depth is reached; the last stored guess corresponds to the depth-th turn (start word counts as turn 1).
+- Because every possible feedback code (0..242) is iterated, the resulting tree covers all branches for the selected depth. Runtime lookup never needs to revert to entropy search until it exhausts the precomputed depth.
+
 ## Regeneration
 ```
-python3 tools/generate_lookup.py --depth 3 --start roate
+./build/solver_cpp --generate-lookup --start roate --depth 4 --output lookup_roate.bin
 ```
-The tool invokes the solver in `--dump-json` mode for every official answer, builds the sparse tree up to the requested depth, and writes the binary file. Adjust the `--start` and `--depth` flags to target other start words or deeper tables.
+The solver filters candidates and runs the search internally for each branch, ensuring the lookup mirrors the exact runtime behavior. Adjust `--start`, `--depth`, and `--output` as needed.

@@ -1,0 +1,9 @@
+- [x] Update PLAN.md / TODO.md (current file).
+- [x] Document binary format & generator workflow in DESIGN.md.
+- [x] Add `--generate-lookup` CLI handling.
+- [x] Implement lookup generator within solver.
+- [x] Remove tools/generate_lookup.py and any unused assets.
+- [x] Update README with new generation instructions.
+- [x] Rebuild lookup table (depth default 4) via new mode.
+- [x] Run benchmark/tests.
+- [ ] Ensure formatting & tidy repo; commit.

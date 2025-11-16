@@ -20,7 +20,7 @@ For additional performance the solver uses two precomputed assets:
 
 - `word_lists.h` and `opening_table.h` are generated once from the text lists and embedded directly into the binary. You generally do not need to touch these files, but keeping the text lists in sync ensures the embedded data stays accurate.
 - `feedback_table.bin` is an optional binary cache containing the results of `calculate_feedback_encoded` for every (guess, answer) pair. Running the solver with `./build/solver_cpp --build-feedback-table` creates the file (≈29 MB). When present, the solver memory-maps this cache at startup and skips recomputing feedback in the hot loops. If the file is absent, the solver falls back to the slower but correct on-the-fly calculations.
-- `lookup_roate.bin` is a sparse lookup table capturing the optimal next guesses for the default start word (`roate`). Generate it with `python3 tools/generate_lookup.py --depth 4`. The solver automatically loads this file (when present) and follows the precomputed tree before falling back to the entropy search. Delete the file if you want to force the solver to recompute guesses dynamically.
+- `lookup_roate.bin` is a sparse lookup table capturing the optimal next guesses for the default start word (`roate`). Generate it via the solver itself: `./build/solver_cpp --generate-lookup --lookup-start roate --lookup-depth 4 --lookup-output lookup_roate.bin`. The solver automatically loads this file (when present) and follows the precomputed tree before falling back to the entropy search. Delete the file if you want to force the solver to recompute guesses dynamically.
 
 ## Modes of Operation
 
