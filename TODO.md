@@ -19,8 +19,10 @@
 - [ ] Implement new lookup generator:
   - [x] Add state bitset type and memoization cache keyed by remaining subsets.
   - [x] Introduce tunable lookahead depth and scoring heuristic (max subset, total size, letter-weight tie breaker).
-  - [ ] Enforce depth ≤ 6 with backtracking when branches overflow.
-  - [ ] Emit sparse nodes from the in-memory tree into the existing binary format.
+  - [x] Enforce depth ≤ 6 with backtracking when branches overflow.
+  - [x] Emit sparse nodes from the in-memory tree into the existing binary format.
 - [ ] Thread new generator into CLI (`generate` mode) with appropriate flags.
 - [ ] Add validation/regression tests proving every word in `words.txt` resolves ≤ 6 turns.
 - [ ] Update DESIGN.md/README.md with finalized generator details once implementation stabilizes.
+- [x] Add `--word-list` override for generator experiments (load alternative vocabulary at runtime).
+- [ ] Regenerate `lookup_roate.bin` with the new backtracking generator and benchmark across the full `official_answers.txt`.

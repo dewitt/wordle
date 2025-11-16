@@ -31,7 +31,7 @@ The `solver` binary exposes four explicit modes so you always know which workflo
 
 - `solve <word>`: non-interactively solve a single target. Pass `--debug` for verbose, turn-by-turn output plus lookup diagnostics, and `--dump-json` to emit a structured trace instead of human-readable text.
 - `start`: exhaustively analyze all guesses to report the best opening word.
-- `generate`: build `lookup_<word>.bin` files (and optionally rebuild `feedback_table.bin`) entirely inside the C++ binary. Flags such as `--lookup-depth` (default 6), `--lookup-output`, `--lookup-start`, and `--feedback-table` customize the generated assets. You must run this mode at least once (to produce `lookup_roate.bin`) before using `solve`.
+- `generate`: build `lookup_<word>.bin` files (and optionally rebuild `feedback_table.bin`) entirely inside the C++ binary. Flags such as `--lookup-depth` (default 6), `--lookup-output`, `--lookup-start`, `--feedback-table`, and `--word-list FILE` (override dictionary for experiments) customize the generated assets. You must run this mode at least once (to produce `lookup_roate.bin`) before using `solve`.
 - `help`: display a concise usage summary. `--help` is equivalent and may appear anywhere.
 
 ## Code Layout
@@ -91,4 +91,7 @@ Examples:
 
 # Build the depth-6 lookup tree for ROATE (required before solving)
 ./build/solver generate --lookup-start roate --lookup-depth 6 --lookup-output lookup_roate.bin --feedback-table
+
+# Experiment with a tiny word list (useful for generator debugging)
+./build/solver generate --word-list test_words.txt --lookup-start roate --lookup-output lookup_test.bin
 ```

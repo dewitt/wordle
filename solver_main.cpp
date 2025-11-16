@@ -2,6 +2,7 @@
 #include <cctype>
 #include <chrono>
 #include <iostream>
+#include <memory>
 #include <numeric>
 #include <string>
 #include <string_view>
@@ -21,6 +22,7 @@ void print_usage(const char *prog_name) {
       << "  " << prog_name
       << " generate [--lookup-depth N] [--lookup-output FILE]\n"
          "         [--lookup-start WORD] [--feedback-table]\n"
+         "         [--word-list FILE]\n"
       << "  " << prog_name << " help\n\n"
       << "Flags:\n"
       << "  --debug           Verbose turn-by-turn output plus lookup "
@@ -33,6 +35,8 @@ void print_usage(const char *prog_name) {
       << "  --lookup-start WORD   Start word when generating lookups "
          "(default: roate).\n"
       << "  --feedback-table  Rebuild feedback_table.bin before running.\n"
+      << "  --word-list FILE  Override the word list (generate mode only, for "
+         "experiments).\n"
       << "  --help            Show this summary.\n";
 }
 
@@ -44,6 +48,7 @@ int main(int argc, char *argv[]) {
   bool dump_json = false;
   bool disable_lookup = false;
   bool rebuild_feedback_table = false;
+  std::string word_list_override;
   uint32_t lookup_depth = 6;
   std::string lookup_output;
   encoded_word lookup_start = kInitialGuess;
@@ -83,6 +88,14 @@ int main(int argc, char *argv[]) {
         return 1;
       }
       lookup_output = argv[++i];
+      continue;
+    }
+    if (arg == "--word-list") {
+      if (i + 1 >= argc) {
+        std::cerr << "--word-list requires a path.\n";
+        return 1;
+      }
+      word_list_override = argv[++i];
       continue;
     }
     if (arg == "--lookup-start") {
@@ -171,39 +184,67 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  const auto &words = load_words();
-  const LookupTables &lookups = load_lookup_tables();
-  if (words.empty()) {
+  const std::vector<encoded_word> *words = &load_words();
+  const LookupTables *lookups = &load_lookup_tables();
+  std::unique_ptr<std::vector<encoded_word>> custom_words;
+  std::unique_ptr<LookupTables> custom_lookup_tables;
+
+  const std::vector<uint32_t> *word_weights = &load_word_weights();
+  std::unique_ptr<std::vector<uint32_t>> custom_weights;
+
+  if (!word_list_override.empty()) {
+    if (!generate_mode) {
+      std::cerr << "--word-list override currently supported only in generate mode.\n";
+      return 1;
+    }
+    custom_words = std::make_unique<std::vector<encoded_word>>(
+        load_words_from_file(word_list_override));
+    if (custom_words->empty()) {
+      return 1;
+    }
+    custom_lookup_tables = std::make_unique<LookupTables>(
+        build_lookup_tables_from_words(*custom_words));
+    custom_weights = std::make_unique<std::vector<uint32_t>>(
+        compute_word_weights(*custom_words));
+    words = custom_words.get();
+    lookups = custom_lookup_tables.get();
+    word_weights = custom_weights.get();
+  }
+  if (words->empty()) {
     std::cerr << "Embedded word list is empty. Exiting.\n";
     return 1;
   }
 
   if (rebuild_feedback_table) {
-    if (!build_feedback_table_file(std::string(kFeedbackTablePath), words)) {
+    if (!build_feedback_table_file(std::string(kFeedbackTablePath), *words)) {
       return 1;
     }
   }
 
-  FeedbackTable feedback_table =
-      load_feedback_table(std::string(kFeedbackTablePath), words.size());
-  const FeedbackTable *feedback_ptr =
-      feedback_table.loaded() ? &feedback_table : nullptr;
-
-  if (!feedback_ptr) {
-    std::cerr << "Warning: feedback table not found at '" << kFeedbackTablePath
-              << "'. Falling back to slower feedback calculation.\n";
+  FeedbackTable feedback_table;
+  const FeedbackTable *feedback_ptr = nullptr;
+  if (word_list_override.empty()) {
+    feedback_table =
+        load_feedback_table(std::string(kFeedbackTablePath), words->size());
+    if (feedback_table.loaded()) {
+      feedback_ptr = &feedback_table;
+    } else {
+      std::cerr << "Warning: feedback table not found at '"
+                << kFeedbackTablePath
+                << "'. Falling back to slower feedback calculation.\n";
+    }
   }
 
   if (generate_mode) {
-    if (!lookups.word_index.count(lookup_start)) {
+    if (!lookups->word_index.count(lookup_start)) {
       std::cerr << "Lookup start word must be in the allowed guess list.\n";
       return 1;
     }
     if (lookup_output.empty()) {
       lookup_output = "lookup_" + decode_word(lookup_start) + ".bin";
     }
-    if (!generate_lookup_table(lookup_output, words, lookup_start, lookup_depth,
-                               feedback_ptr, lookups)) {
+    if (!generate_lookup_table(lookup_output, *words, lookup_start, lookup_depth,
+                               feedback_ptr, *lookups)) {
       return 1;
     }
     return 0;
@@ -223,15 +264,15 @@ int main(int argc, char *argv[]) {
   }
 
   if (start_mode) {
-    std::vector<size_t> indices(words.size());
+    std::vector<size_t> indices(words->size());
     std::iota(indices.begin(), indices.end(), 0);
-    std::cout << "Calculating the best starting word across " << words.size()
+    std::cout << "Calculating the best starting word across " << words->size()
               << " valid words..." << std::endl;
 
     const auto start_time = std::chrono::high_resolution_clock::now();
     const encoded_word best_word =
-        find_best_guess_encoded(indices, words, feedback_ptr, lookups,
-                                load_word_weights());
+        find_best_guess_encoded(indices, *words, feedback_ptr, *lookups,
+                                *word_weights);
     const auto end_time = std::chrono::high_resolution_clock::now();
     const std::chrono::duration<double> elapsed = end_time - start_time;
 
@@ -241,15 +282,15 @@ int main(int argc, char *argv[]) {
   }
 
   const encoded_word encoded_answer = encode_word(word_to_solve);
-  if (!lookups.word_index.count(encoded_answer)) {
+  if (!lookups->word_index.count(encoded_answer)) {
     std::cerr << "Error: '" << word_to_solve
               << "' is not in the valid word list.\n";
     return 1;
   }
 
   SolutionTrace trace;
-  run_non_interactive(encoded_answer, words, debug_flag, !dump_json, &trace,
-                      debug_flag, feedback_ptr, lookups, lookup_ptr);
+  run_non_interactive(encoded_answer, *words, debug_flag, !dump_json, &trace,
+                      debug_flag, feedback_ptr, *lookups, lookup_ptr);
 
   if (dump_json) {
     std::cout << "[";

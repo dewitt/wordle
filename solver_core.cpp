@@ -45,7 +45,8 @@ feedback_int calculate_feedback_encoded(encoded_word guess_encoded,
   return final_feedback;
 }
 
-LookupTables build_lookup_tables(const std::vector<encoded_word> &words) {
+LookupTables build_lookup_tables_from_words(
+    const std::vector<encoded_word> &words) {
   LookupTables tables;
   tables.word_index.reserve(words.size());
   for (size_t i = 0; i < words.size(); ++i) {
@@ -55,7 +56,8 @@ LookupTables build_lookup_tables(const std::vector<encoded_word> &words) {
 }
 
 const LookupTables &load_lookup_tables() {
-  static const LookupTables tables = build_lookup_tables(load_words());
+  static const LookupTables tables =
+      build_lookup_tables_from_words(load_words());
   return tables;
 }
 
@@ -155,7 +157,8 @@ encoded_word find_best_guess_encoded(
     const std::vector<size_t> &possible_indices,
     const std::vector<encoded_word> &words,
     const FeedbackTable *feedback_table, const LookupTables &lookups,
-    const std::vector<uint32_t> &weights) {
+    const std::vector<uint32_t> &weights,
+    const std::unordered_set<encoded_word> *banned_guesses) {
   if (possible_indices.empty()) {
     return 0;
   }
@@ -168,6 +171,16 @@ encoded_word find_best_guess_encoded(
   std::vector<std::vector<encoded_word>> word_chunks(num_threads);
   for (size_t i = 0; i < guesses_to_check->size(); ++i) {
     word_chunks[i % num_threads].push_back((*guesses_to_check)[i]);
+  }
+
+  if (banned_guesses && !banned_guesses->empty()) {
+    for (auto &chunk : word_chunks) {
+      chunk.erase(std::remove_if(chunk.begin(), chunk.end(),
+                                 [&](encoded_word guess) {
+                                   return banned_guesses->count(guess) > 0;
+                                 }),
+                  chunk.end());
+    }
   }
 
   std::vector<std::future<std::pair<encoded_word, double>>> futures;

@@ -23,6 +23,8 @@ inline uint8_t get_char_code_at(encoded_word word, int pos) {
 
 std::string decode_word(encoded_word encoded);
 const std::vector<encoded_word> &load_words();
+std::vector<encoded_word> load_words_from_file(const std::string &path);
+std::vector<uint32_t> compute_word_weights(const std::vector<encoded_word> &words);
 const std::vector<uint32_t> &load_word_weights();
 
 inline constexpr encoded_word kInitialGuess = encode_word("roate");

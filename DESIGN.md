@@ -45,8 +45,9 @@ The `solver` binary accepts a primary mode followed by flag arguments:
 - `start` – exhaustively analyze all words to report the best opening word.
   Primarily used when experimenting with new heuristics or data sets.
 - `generate` – create auxiliary assets. Flags: `--lookup-start`,
-  `--lookup-depth` (default 6), `--lookup-output`, and `--feedback-table`
-  (rebuilds `feedback_table.bin` first).
+  `--lookup-depth` (default 6), `--lookup-output`, `--feedback-table`
+  (rebuilds `feedback_table.bin` first), and `--word-list FILE` (temporary
+  override of the vocabulary for experiments).
 - `help` / `--help` – print usage.
 
 All flags are mode-agnostic and may appear before or after the mode token.
@@ -144,28 +145,21 @@ and follows this pipeline:
 ```
 
 1. **State bitsets + memoization** – Every node corresponds to a candidate
-   subset tracked as a bitset over `words.txt`. These bitsets are hashed and
-   memoized so equivalent states (regardless of the feedback path that
-   produced them) reuse cached scores and children.
+   subset tracked as a bitset over the current word list. These bitsets are
+   hashed and memoized so equivalent states reuse cached results.
 1. **Scoring with tunable lookahead** – For a given state the generator
-   evaluates every legal guess. It simulates feedback partitions, and for each
-   partition recursively evaluates up to *L* additional plies (lookahead
-   depth, default ≥ 2). The score minimizes the maximum remaining subset size;
-   ties fall back to minimizing the sum of subset sizes.
-1. **Letter-frequency tie breaker** – When scores still tie, the candidate
-   with the highest aggregate letter-frequency weight wins. The weight table
-   is derived once from `words.txt` (counting positions and penalizing
-   duplicates) so natural-language guesses are preferred.
-1. **Depth enforcement + backtracking** – After selecting a guess, the
-   generator checks whether every resulting branch can complete within the
-   configured global depth (Wordle limit 6). If any branch overflows, the
-   algorithm backtracks, tries the next-best guess (using cached subproblem
-   scores), and repeats until every path is ≤ depth. This yields a complete
-   tree without runtime fallbacks.
-1. **Sparse emission** – Only reachable feedback IDs are emitted. Each stored
-   entry records the chosen guess and, if more turns remain, the on-disk
-   offset to the child node. Singleton subsets end the branch immediately
-   (leaf entry with `child_offset = 0` and the known answer as the guess).
+   evaluates legal guesses in heuristic order (worst-case candidate count,
+   total candidate count, then letter-frequency weight). Lookahead depth is
+   configurable so we can peek multiple plies ahead before committing.
+1. **Depth enforcement + backtracking** – The generator builds an explicit
+   in-memory tree. For each guess it recursively solves every feedback branch.
+   If any branch exceeds the remaining depth, that guess is banned and the
+   algorithm rewinds to try the next candidate. This repeats until the entire
+   state resolves within the Wordle limit (6 turns).
+1. **Sparse emission** – After the full tree exists in memory, the serializer
+   walks the nodes and emits the binary lookup file. Only reachable feedback
+   IDs are stored, and singleton subsets terminate immediately with
+   `child_offset = 0`.
 
 Because memoization and lookahead share a cache across the entire run, deep
 exploration stays tractable even when we regenerate the tree frequently.
