@@ -37,11 +37,12 @@ struct Header {
     char     magic[4];      // "PLUT"
     uint32_t version;       // currently 1
     uint32_t depth;         // number of guesses captured per sequence
+    uint32_t root_offset;   // byte offset of the root node (always 32)
     uint64_t start_encoded; // encoded form of the start word
     char     start_word[5]; // ASCII start word (no null terminator)
     char     reserved[3];   // padding (zero)
-    uint32_t root_offset;   // byte offset of the root node (always 32)
 };
+static_assert(sizeof(Header) == 32);
 ```
 
 ## Node

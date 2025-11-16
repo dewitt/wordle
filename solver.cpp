@@ -113,6 +113,17 @@ struct LookupTables {
   std::unordered_map<encoded_word, size_t> word_index;
 };
 
+struct LookupHeader {
+  char magic[4];
+  uint32_t version;
+  uint32_t depth;
+  uint32_t root_offset;
+  encoded_word start_encoded;
+  char start_word[5];
+  char reserved[3];
+};
+static_assert(sizeof(LookupHeader) == 32, "LookupHeader must be 32 bytes");
+
 struct PrecomputedLookup {
   std::vector<uint8_t> buffer;
   const uint8_t *root = nullptr;
@@ -130,25 +141,21 @@ struct PrecomputedLookup {
       buffer.clear();
       return false;
     }
-    if (size < 32)
+    if (buffer.size() < sizeof(LookupHeader))
       return false;
-    const uint8_t *ptr = buffer.data();
-    if (std::memcmp(ptr, "PLUT", 4) != 0)
+    LookupHeader header{};
+    std::memcpy(&header, buffer.data(), sizeof(header));
+    if (std::memcmp(header.magic, "PLUT", 4) != 0)
       return false;
-    ptr += 4;
-    const uint32_t version = *reinterpret_cast<const uint32_t *>(ptr);
-    ptr += 4;
-    depth = *reinterpret_cast<const uint32_t *>(ptr);
-    ptr += 4;
-    start_word = *reinterpret_cast<const encoded_word *>(ptr);
-    ptr += sizeof(encoded_word);
-    ptr += 5; // start word string
-    ptr += 3; // padding
-    const uint32_t root_offset = *reinterpret_cast<const uint32_t *>(ptr);
-    if (version != 1 || start_word != expected_start ||
-        root_offset >= buffer.size())
+    if (header.version != 1)
       return false;
-    root = buffer.data() + root_offset;
+    depth = header.depth;
+    start_word = header.start_encoded;
+    if (start_word != expected_start)
+      return false;
+    if (header.root_offset >= buffer.size())
+      return false;
+    root = buffer.data() + header.root_offset;
     return true;
   }
 
@@ -927,16 +934,6 @@ int main(int argc, char *argv[]) {
 
   return 0;
 }
-struct LookupHeader {
-  char magic[4];
-  uint32_t version;
-  uint32_t depth;
-  encoded_word start_encoded;
-  char start_word[5];
-  char reserved[3];
-  uint32_t root_offset;
-};
-
 bool generate_lookup_table(const std::string &path,
                            const std::vector<encoded_word> &words,
                            encoded_word start, uint32_t depth,
@@ -1037,11 +1034,15 @@ bool generate_lookup_table(const std::string &path,
     return false;
   }
 
-  LookupHeader header{{'P', 'L', 'U', 'T'}, 1, depth, start};
+  LookupHeader header{};
+  std::memcpy(header.magic, "PLUT", 4);
+  header.version = 1;
+  header.depth = depth;
+  header.root_offset = HEADER_SIZE + root_offset;
+  header.start_encoded = start;
   std::string start_word = decode_word(start);
   std::memcpy(header.start_word, start_word.c_str(),
               std::min<size_t>(5, start_word.size()));
-  header.root_offset = HEADER_SIZE + root_offset;
 
   out.write(reinterpret_cast<const char *>(&header), sizeof(header));
   out.write(reinterpret_cast<const char *>(buffer.data()),
